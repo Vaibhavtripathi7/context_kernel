@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "context-kernel"
+version = "0.1.0"
+description = "ACK: Agent Context Kernel — intelligent memory middleware for AI coding agents"
+authors = ["Vaibhav Tripathi <vaibhavtripathi2020@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "context_kernel" }]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+textual = "^0.65.0"
+click  = "^8.1"
+tree-sitter        = "^0.23.0"
+tree-sitter-python = "^0.23.0"
+
+[build-system]
+requires      = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
