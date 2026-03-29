@@ -109,3 +109,73 @@ class StorageEngine:
             except Exception:
                 db.execute("ROLLBACK")
                 raise
+
+    def _migrate(self) -> None:
+        with self._transaction() as db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id         TEXT PRIMARY KEY,
+                    agent_command      TEXT NOT NULL,
+                    started_at         REAL NOT NULL,
+                    ended_at           REAL,
+                    total_tokens_saved INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS log_entries (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id         TEXT    NOT NULL
+                                           REFERENCES sessions(session_id)
+                                           ON DELETE CASCADE,
+                    timestamp          REAL    NOT NULL,
+                    entry_type         TEXT    NOT NULL DEFAULT 'stdout',
+                    raw_content        TEXT    NOT NULL,
+                    compressed_summary TEXT    NOT NULL DEFAULT '',
+                    token_estimate     INTEGER NOT NULL DEFAULT 0,
+                    was_pruned         INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_log_session_time
+                    ON log_entries(session_id, timestamp DESC)
+            """)
+
+            db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS log_fts USING fts5(
+                    raw_content,
+                    compressed_summary,
+                    entry_type,
+                    content     = 'log_entries',
+                    content_rowid = 'id',
+                    tokenize    = 'porter ascii'
+                )
+            """)
+
+            db.execute("""
+                CREATE TRIGGER IF NOT EXISTS log_fts_ai
+                AFTER INSERT ON log_entries BEGIN
+                    INSERT INTO log_fts(rowid, raw_content, compressed_summary, entry_type)
+                    VALUES (new.id, new.raw_content, new.compressed_summary, new.entry_type);
+                END
+            """)
+
+            db.execute("""
+                CREATE TRIGGER IF NOT EXISTS log_fts_ad
+                AFTER DELETE ON log_entries BEGIN
+                    INSERT INTO log_fts(log_fts, rowid, raw_content, compressed_summary, entry_type)
+                    VALUES ('delete', old.id, old.raw_content,
+                            old.compressed_summary, old.entry_type);
+                END
+            """)
+
+            db.execute("""
+                CREATE TRIGGER IF NOT EXISTS log_fts_au
+                AFTER UPDATE ON log_entries BEGIN
+                    INSERT INTO log_fts(log_fts, rowid, raw_content, compressed_summary, entry_type)
+                    VALUES ('delete', old.id, old.raw_content,
+                            old.compressed_summary, old.entry_type);
+                    INSERT INTO log_fts(rowid, raw_content, compressed_summary, entry_type)
+                    VALUES (new.id, new.raw_content, new.compressed_summary, new.entry_type);
+                END
+            """)
