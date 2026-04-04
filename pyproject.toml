@@ -5,15 +5,78 @@ description = "ACK: Agent Context Kernel — intelligent memory middleware for A
 authors = ["Vaibhav Tripathi <vaibhavtripathi2020@gmail.com>"]
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/vaibhavtripathi/context-kernel"
+keywords = ["llm", "ai-agents", "context-window", "pty", "developer-tools"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+]
 packages = [{ include = "context_kernel" }]
 
 [tool.poetry.dependencies]
 python = "^3.13"
 textual = "^0.65.0"
 click  = "^8.1"
+# tree-sitter 0.23 ships the new one-step Language(grammar.language()) API.
+# tree-sitter-python provides the compiled Python grammar as a shared library.
 tree-sitter        = "^0.23.0"
 tree-sitter-python = "^0.23.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest            = "^8.2"
+pytest-asyncio    = "^0.24"
+mypy              = "^1.10"
+ruff              = "^0.4"
 
 [build-system]
 requires      = ["poetry-core>=1.8.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+ack = "context_kernel.cli:main"
+
+# ── mypy ────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version    = "3.13"
+strict            = true
+warn_return_any   = true
+warn_unused_configs = true
+# Textual and the tree-sitter wheels ship no type stubs; subclassing/using them
+# under --strict would otherwise produce unavoidable noise.
+disallow_subclassing_any = false
+# Some inline ``# type: ignore`` comments guard the *pinned* (older) versions of
+# textual / tree-sitter, where the stubs differ from the latest release. Don't
+# fail the build when a newer local install happens not to need one.
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = ["tree_sitter", "tree_sitter_python", "textual.*"]
+ignore_missing_imports = true
+
+# ── ruff ────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length    = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "ANN", "S", "B", "C4", "SIM"]
+ignore = [
+    "ANN101",  # self annotation not required
+    "S603",    # subprocess with shell=False is fine
+    "S606",    # os.fork usage is intentional
+    "S101",    # asserts are used for type-narrowing invariants, not validation
+    "S110",    # fire-and-forget try/except/pass is intentional in the I/O loop
+    "SIM105",  # explicit try/except/pass reads clearer with its inline comment
+]
+
+# ── pytest ───────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]
+
+markers = ["integration: marks tests that fork a subprocess (deselect with -m not integration)"]
