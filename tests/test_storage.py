@@ -71,3 +71,46 @@ class TestSchemaSetup:
                     entry_type="stdout",
                 )
             )
+
+
+class TestSessionOperations:
+    """Full CRUD lifecycle for session rows."""
+
+    def test_create_session_returns_record(self, engine: StorageEngine) -> None:
+        rec = engine.create_session("aider --model gpt-4o")
+        assert rec.session_id
+        assert rec.agent_command == "aider --model gpt-4o"
+        assert rec.started_at > 0.0
+        assert rec.ended_at is None
+
+    def test_get_session_roundtrip(self, engine: StorageEngine, session: SessionRecord) -> None:
+        fetched = engine.get_session(session.session_id)
+        assert fetched is not None
+        assert fetched.session_id    == session.session_id
+        assert fetched.agent_command == session.agent_command
+
+    def test_get_session_returns_none_for_unknown_id(self, engine: StorageEngine) -> None:
+        assert engine.get_session("00000000-dead-beef-0000-000000000000") is None
+
+    def test_close_session_stamps_end_time(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        before = time.time()
+        engine.close_session(session.session_id, tokens_saved=512)
+        after  = time.time()
+
+        rec = engine.get_session(session.session_id)
+        assert rec is not None
+        assert rec.total_tokens_saved == 512
+        assert before <= rec.ended_at <= after  # type: ignore[operator]
+
+    def test_list_sessions_newest_first(self, engine: StorageEngine) -> None:
+        for i in range(3):
+            engine.create_session(f"agent-{i}")
+            time.sleep(0.01)
+
+        rows = engine.list_sessions(limit=5)
+        timestamps = [r["started_at"] for r in rows]
+        assert timestamps == sorted(timestamps, reverse=True), (
+            "list_sessions() must return newest sessions first."
+        )
