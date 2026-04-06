@@ -114,3 +114,97 @@ class TestSessionOperations:
         assert timestamps == sorted(timestamps, reverse=True), (
             "list_sessions() must return newest sessions first."
         )
+
+
+class TestLogEntryOperations:
+    """Insert, retrieve, and aggregate log entries."""
+
+    def _make_entry(
+        self,
+        session_id: str,
+        content: str = "test output",
+        entry_type: str = "stdout",
+        pruned: bool = False,
+        summary: str = "",
+    ) -> LogEntry:
+        return LogEntry(
+            session_id=session_id,
+            raw_content=content,
+            entry_type=entry_type,
+            compressed_summary=summary,
+            token_estimate=len(content) // 4,
+            was_pruned=pruned,
+        )
+
+    def test_insert_entry_returns_integer_id(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        row_id = engine.insert_entry(self._make_entry(session.session_id))
+        assert isinstance(row_id, int)
+        assert row_id >= 1
+
+    def test_insert_entry_ids_are_monotonically_increasing(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        ids = [
+            engine.insert_entry(self._make_entry(session.session_id, f"line {i}"))
+            for i in range(5)
+        ]
+        assert ids == sorted(ids), "Row IDs must be monotonically increasing."
+
+    def test_get_recent_entries_respects_limit(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        for i in range(20):
+            engine.insert_entry(self._make_entry(session.session_id, f"entry {i}"))
+
+        rows = engine.get_recent_entries(session.session_id, limit=7)
+        assert len(rows) == 7
+
+    def test_get_recent_entries_newest_first(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        for i in range(5):
+            engine.insert_entry(self._make_entry(session.session_id, f"msg {i}"))
+            time.sleep(0.005)
+
+        rows = engine.get_recent_entries(session.session_id, limit=5)
+        ts   = [r["timestamp"] for r in rows]
+        assert ts == sorted(ts, reverse=True)
+
+    def test_bulk_insert_all_or_nothing(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        batch = [
+            self._make_entry(session.session_id, f"bulk {i}") for i in range(10)
+        ]
+        engine.bulk_insert_entries(batch)
+        stats = engine.stats(session.session_id)
+        assert stats["total_entries"] == 10
+
+    def test_was_pruned_flag_stored_correctly(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        engine.insert_entry(
+            self._make_entry(session.session_id, "raw blob", pruned=True, summary="short")
+        )
+        engine.insert_entry(
+            self._make_entry(session.session_id, "pass-through")
+        )
+        stats = engine.stats(session.session_id)
+        assert stats["pruned_entries"] == 1
+
+    def test_token_estimate_aggregated_in_stats(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        for _ in range(4):
+            engine.insert_entry(
+                LogEntry(
+                    session_id=session.session_id,
+                    raw_content="x" * 400,
+                    entry_type="stdout",
+                    token_estimate=100,
+                )
+            )
+        stats = engine.stats(session.session_id)
+        assert stats["raw_tokens"] == 400
