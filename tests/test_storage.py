@@ -208,3 +208,110 @@ class TestLogEntryOperations:
             )
         stats = engine.stats(session.session_id)
         assert stats["raw_tokens"] == 400
+
+
+class TestFTS5Search:
+    """Verify that the FTS5 content-table triggers index entries correctly."""
+
+    def _insert(
+        self,
+        engine: StorageEngine,
+        session_id: str,
+        content: str,
+        summary: str = "",
+        pruned: bool = False,
+    ) -> int:
+        return engine.insert_entry(
+            LogEntry(
+                session_id=session_id,
+                raw_content=content,
+                entry_type="stderr" if "Error" in content else "stdout",
+                compressed_summary=summary,
+                was_pruned=pruned,
+            )
+        )
+
+    def test_basic_keyword_search_returns_match(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        self._insert(engine, session.session_id, "ImportError: No module named 'pandas'")
+        rows = engine.search("ImportError", session_id=session.session_id)
+        assert len(rows) == 1
+        assert "pandas" in rows[0]["raw_content"]
+
+    def test_search_across_multiple_entries(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        self._insert(engine, session.session_id, "Error: disk partition is full")
+        self._insert(engine, session.session_id, "Error: network connection refused")
+        self._insert(engine, session.session_id, "Build succeeded in 2.4s")
+
+        results = engine.search("Error", session_id=session.session_id)
+        assert len(results) == 2
+
+    def test_search_in_compressed_summary(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        self._insert(
+            engine,
+            session.session_id,
+            content="<raw 500-line traceback>",
+            summary="KeyError: 'user_id' at api/views.py:42",
+            pruned=True,
+        )
+        results = engine.search("KeyError", session_id=session.session_id)
+        assert len(results) == 1
+
+    def test_search_without_session_filter_returns_all_sessions(
+        self, engine: StorageEngine
+    ) -> None:
+        s1 = engine.create_session("agent-1")
+        s2 = engine.create_session("agent-2")
+        self._insert(engine, s1.session_id, "PermissionError: access denied in session 1")
+        self._insert(engine, s2.session_id, "PermissionError: access denied in session 2")
+
+        results = engine.search("PermissionError")
+        assert len(results) == 2
+
+    def test_search_limit_respected(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        for i in range(10):
+            self._insert(engine, session.session_id, f"RuntimeError: crash #{i}")
+
+        results = engine.search("RuntimeError", session_id=session.session_id, limit=3)
+        assert len(results) == 3
+
+    def test_search_fts5_boolean_or_operator(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        self._insert(engine, session.session_id, "ImportError: missing module")
+        self._insert(engine, session.session_id, "ModuleNotFoundError: missing dep")
+        self._insert(engine, session.session_id, "Build completed successfully")
+
+        results = engine.search(
+            "ImportError OR ModuleNotFoundError",
+            session_id=session.session_id,
+        )
+        assert len(results) == 2
+
+    def test_deleted_entry_not_returned_by_search(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        """
+        FTS5 DELETE trigger must remove the entry from the index.
+
+        This is the most critical FTS5 invariant: a stale index entry for a
+        deleted row would return a null JOIN hit, which crashes the query.
+        """
+        row_id = self._insert(engine, session.session_id, "UniqueCrash: only once")
+
+        engine._db.execute("BEGIN")                                              # type: ignore
+        engine._db.execute("DELETE FROM log_entries WHERE id = ?", (row_id,))   # type: ignore
+        engine._db.execute("COMMIT")                                             # type: ignore
+
+        results = engine.search("UniqueCrash", session_id=session.session_id)
+        assert len(results) == 0, (
+            "Deleted row must not appear in FTS5 results.  "
+            "Check the log_fts_ad DELETE trigger."
+        )
