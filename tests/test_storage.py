@@ -315,3 +315,107 @@ class TestFTS5Search:
             "Deleted row must not appear in FTS5 results.  "
             "Check the log_fts_ad DELETE trigger."
         )
+
+
+class TestConcurrentWALWrites:
+    """
+    Prove that SQLite WAL mode serialises concurrent writers without data loss.
+
+    WAL allows one writer at a time but never blocks readers.  This test
+    spawns N threads that each write M entries simultaneously; after all
+    threads join, the total row count must equal N × M with zero errors.
+    """
+
+    def test_concurrent_writes_no_data_loss(
+        self, db_path: Path
+    ) -> None:
+        N_THREADS = 8
+        M_ENTRIES = 50
+
+        eng = StorageEngine(db_path=db_path)
+        eng.open()
+        session = eng.create_session("concurrent-write-test")
+        sid     = session.session_id
+
+        errors: list[Exception] = []
+
+        def write_worker(thread_id: int) -> None:
+            for i in range(M_ENTRIES):
+                try:
+                    eng.insert_entry(
+                        LogEntry(
+                            session_id=sid,
+                            raw_content=f"T{thread_id}:entry{i}: {'data' * 25}",
+                            entry_type="stdout",
+                            token_estimate=25,
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=write_worker, args=(tid,), daemon=True)
+            for tid in range(N_THREADS)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, (
+            f"{len(errors)} write error(s) occurred under concurrent load:\n"
+            + "\n".join(str(e) for e in errors[:5])
+        )
+
+        stats = eng.stats(sid)
+        assert stats["total_entries"] == N_THREADS * M_ENTRIES, (
+            f"Expected {N_THREADS * M_ENTRIES} entries, got {stats['total_entries']}. "
+            "Concurrent writes may have caused lost rows."
+        )
+        eng.close()
+
+    def test_concurrent_reads_during_write(self, db_path: Path) -> None:
+        """
+        One writer thread + one reader thread must not dead-lock.
+
+        WAL allows readers to proceed while a write transaction is open.
+        If this test hangs, SQLite is NOT in WAL mode.
+        """
+        N = 100
+        eng = StorageEngine(db_path=db_path)
+        eng.open()
+        session = eng.create_session("read-write-concurrent")
+        sid     = session.session_id
+
+        for i in range(5):
+            eng.insert_entry(
+                LogEntry(session_id=sid, raw_content=f"seed {i}", entry_type="stdout")
+            )
+
+        reader_errors: list[Exception] = []
+
+        def reader_worker() -> None:
+            for _ in range(N):
+                try:
+                    eng.get_recent_entries(sid, limit=5)
+                except Exception as exc:
+                    reader_errors.append(exc)
+
+        def writer_worker() -> None:
+            for i in range(N):
+                eng.insert_entry(
+                    LogEntry(session_id=sid, raw_content=f"concurrent {i}", entry_type="stdout")
+                )
+
+        r_thread = threading.Thread(target=reader_worker, daemon=True)
+        w_thread = threading.Thread(target=writer_worker, daemon=True)
+
+        r_thread.start()
+        w_thread.start()
+        r_thread.join(timeout=20)
+        w_thread.join(timeout=20)
+
+        assert not r_thread.is_alive(), "Reader thread timed out — possible deadlock."
+        assert not w_thread.is_alive(), "Writer thread timed out — possible deadlock."
+        assert not reader_errors, f"Reader errors: {reader_errors}"
+        eng.close()
