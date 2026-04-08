@@ -419,3 +419,64 @@ class TestConcurrentWALWrites:
         assert not w_thread.is_alive(), "Writer thread timed out — possible deadlock."
         assert not reader_errors, f"Reader errors: {reader_errors}"
         eng.close()
+
+
+class TestStatsAggregation:
+    """Verify the aggregate SQL query returns correct counts."""
+
+    def test_stats_all_zeros_on_empty_session(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        stats = engine.stats(session.session_id)
+        assert stats == {
+            "total_entries":  0,
+            "pruned_entries": 0,
+            "raw_tokens":     0,
+            "tokens_saved":   0,
+        }
+
+    def test_tokens_saved_counts_only_pruned_entries(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        sid = session.session_id
+        for _ in range(2):
+            engine.insert_entry(
+                LogEntry(
+                    session_id=sid,
+                    raw_content="x" * 800,
+                    entry_type="stdout",
+                    token_estimate=200,
+                    was_pruned=True,
+                )
+            )
+        engine.insert_entry(
+            LogEntry(
+                session_id=sid,
+                raw_content="y" * 200,
+                entry_type="stdout",
+                token_estimate=50,
+                was_pruned=False,
+            )
+        )
+        stats = engine.stats(sid)
+        assert stats["total_entries"]  == 3
+        assert stats["pruned_entries"] == 2
+        assert stats["tokens_saved"]   == 400
+        assert stats["raw_tokens"]     == 450
+
+    def test_stats_isolated_per_session(self, engine: StorageEngine) -> None:
+        """Stats for one session must not bleed into another."""
+        s1 = engine.create_session("agent-a")
+        s2 = engine.create_session("agent-b")
+
+        for _ in range(3):
+            engine.insert_entry(
+                LogEntry(session_id=s1.session_id, raw_content="a", entry_type="stdout")
+            )
+        for _ in range(7):
+            engine.insert_entry(
+                LogEntry(session_id=s2.session_id, raw_content="b", entry_type="stdout")
+            )
+
+        assert engine.stats(s1.session_id)["total_entries"] == 3
+        assert engine.stats(s2.session_id)["total_entries"] == 7
