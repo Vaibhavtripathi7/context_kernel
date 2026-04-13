@@ -139,3 +139,48 @@ class ShellPruner(BasePruner):
             result.append(preamble)
         result.extend(parts)
         return "\n\n".join(result)
+
+    def _compress_rust_errors(self, text: str) -> str:
+        lines = text.splitlines()
+        error_lines   = [ln for ln in lines if _RUST_ERROR_HDR.match(ln)]
+        warning_lines = [ln for ln in lines if ln.startswith("warning[")]
+
+        seen_codes: set[str] = set()
+        unique_errors: list[str] = []
+        for line in error_lines:
+            m = re.match(r"(error\[E\d+\])", line)
+            key = m.group(1) if m else line
+            if key not in seen_codes:
+                seen_codes.add(key)
+                unique_errors.append(line)
+
+        summary: list[str] = [
+            f"[Rust build: {len(error_lines)} error(s), {len(warning_lines)} warning(s) "
+            f"→ {len(unique_errors)} unique error(s)]",
+        ]
+        for err in unique_errors[: self.max_rust_errors]:
+            summary.append(f"  {err}")
+        if len(unique_errors) > self.max_rust_errors:
+            summary.append(
+                f"  … and {len(unique_errors) - self.max_rust_errors} more unique error(s)"
+            )
+
+        return "\n".join(summary)
+
+    def _compress_gcc_errors(self, text: str) -> str:
+        diag_lines = [ln for ln in text.splitlines() if _GCC_DIAG.match(ln)]
+        unique     = list(dict.fromkeys(diag_lines))
+
+        errors   = sum(1 for ln in diag_lines if ": error:"   in ln)
+        warnings = sum(1 for ln in diag_lines if ": warning:" in ln)
+
+        summary: list[str] = [
+            f"[C/C++ build: {errors} error(s), {warnings} warning(s) "
+            f"→ {len(unique)} unique diagnostic(s)]",
+        ]
+        for diag in unique[:15]:
+            summary.append(f"  {diag}")
+        if len(unique) > 15:
+            summary.append(f"  … and {len(unique) - 15} more")
+
+        return "\n".join(summary)
