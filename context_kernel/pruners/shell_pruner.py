@@ -184,3 +184,28 @@ class ShellPruner(BasePruner):
             summary.append(f"  … and {len(unique) - 15} more")
 
         return "\n".join(summary)
+
+    def _is_highly_repetitive(self, text: str) -> bool:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if len(lines) < 10:
+            return False
+        most_common_count = Counter(lines).most_common(1)[0][1]
+        return (most_common_count / len(lines)) >= self.dedup_threshold
+
+    def _compress_repetitive(self, text: str) -> str:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        counts = Counter(lines)
+        total  = len(lines)
+        unique = len(counts)
+
+        summary: list[str] = [
+            f"[Repetitive output: {total} total line(s), {unique} unique]",
+        ]
+        for line, count in counts.most_common(8):
+            display = line[:120] + ("…" if len(line) > 120 else "")
+            summary.append(f"  × {count:>5}  {display}")
+
+        if unique > 8:
+            summary.append(f"  … and {unique - 8} more unique line(s)")
+
+        return "\n".join(summary)
