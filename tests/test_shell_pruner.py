@@ -186,3 +186,37 @@ def _make_log_flood(n_lines: int = 300, n_unique: int = 3) -> str:
 @pytest.fixture(scope="module")
 def pruner() -> ShellPruner:
     return ShellPruner()
+
+
+class TestMatches:
+    """Verify ShellPruner.matches() fires on the right inputs."""
+
+    def test_matches_python_traceback(self, pruner: ShellPruner) -> None:
+        assert pruner.matches(_make_python_traceback_single())
+
+    def test_matches_chained_exception(self, pruner: ShellPruner) -> None:
+        assert pruner.matches(_make_python_traceback_chained())
+
+    def test_matches_rust_errors(self, pruner: ShellPruner) -> None:
+        assert pruner.matches(_make_rust_errors())
+
+    def test_matches_gcc_errors(self, pruner: ShellPruner) -> None:
+        assert pruner.matches(_make_gcc_errors())
+
+    def test_matches_log_flood(self, pruner: ShellPruner) -> None:
+        assert pruner.matches(_make_log_flood())
+
+    def test_does_not_match_short_normal_output(self, pruner: ShellPruner) -> None:
+        text = "Building project...\nCompiling foo.py\nDone in 0.3s\n"
+        assert not pruner.matches(text)
+
+    def test_does_not_match_sparse_unique_lines(self, pruner: ShellPruner) -> None:
+        text = "\n".join(f"Step {i}: completed in {i * 0.1:.1f}s" for i in range(20))
+        assert not pruner.matches(text)
+
+    def test_matches_ansi_coloured_traceback(self, pruner: ShellPruner) -> None:
+        coloured = "\033[31mTraceback (most recent call last):\033[0m\n"
+        coloured += '  File "/app/main.py", line 5, in run\n'
+        coloured += "    raise RuntimeError('boom')\n"
+        coloured += "RuntimeError: boom\n"
+        assert pruner.matches(coloured)
