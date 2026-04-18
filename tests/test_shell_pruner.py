@@ -220,3 +220,72 @@ class TestMatches:
         coloured += "    raise RuntimeError('boom')\n"
         coloured += "RuntimeError: boom\n"
         assert pruner.matches(coloured)
+
+
+class TestPythonTracebackCompression:
+    """Verify content quality and compression ratio for Python tracebacks."""
+
+    def test_single_traceback_preserves_exception_line(self, pruner: ShellPruner) -> None:
+        summary = pruner.compress(_make_python_traceback_single())
+        assert summary is not None
+        assert "ValueError" in summary
+        assert "invalid literal" in summary
+
+    def test_single_traceback_preserves_user_frame(self, pruner: ShellPruner) -> None:
+        """The deepest user-code frame must appear in the summary."""
+        summary = pruner.compress(_make_python_traceback_single())
+        assert summary is not None
+        assert "router.py" in summary
+
+    def test_single_traceback_drops_stdlib_frames(self, pruner: ShellPruner) -> None:
+        """stdlib frames (site-packages, /lib/python) must be filtered out."""
+        summary = pruner.compress(_make_python_traceback_single())
+        assert summary is not None
+        assert "site-packages" not in summary
+        assert "/usr/lib/python" not in summary
+
+    def test_chained_exception_preserves_both_errors(self, pruner: ShellPruner) -> None:
+        summary = pruner.compress(_make_python_traceback_chained())
+        assert summary is not None
+        assert "sqlite3.OperationalError" in summary or "OperationalError" in summary
+        assert "ConnectionError" in summary
+
+    def test_massive_traceback_summary_under_20_lines(self, pruner: ShellPruner) -> None:
+        """A 50-frame traceback must compress to ≤ 20 summary lines."""
+        text    = _make_python_traceback_massive()
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert len(summary.splitlines()) <= 20
+
+    def test_single_traceback_compression_ratio_above_60pct(self, pruner: ShellPruner) -> None:
+        text    = _make_python_traceback_single()
+        summary = pruner.compress(text)
+        assert summary is not None
+        ratio   = compression_ratio(text, summary)
+        assert ratio >= 0.60, (
+            f"Expected ≥60% compression on single traceback, got {ratio:.1%}.\n"
+            f"Original: {len(text)} chars → Summary: {len(summary)} chars."
+        )
+
+    def test_massive_traceback_compression_ratio_above_80pct(self, pruner: ShellPruner) -> None:
+        text    = _make_python_traceback_massive()
+        summary = pruner.compress(text)
+        assert summary is not None
+        ratio   = compression_ratio(text, summary)
+        assert ratio >= 0.80, (
+            f"Expected ≥80% compression on 50-frame traceback, got {ratio:.1%}.\n"
+            f"Original: {len(text)} chars → Summary: {len(summary)} chars."
+        )
+
+    def test_signature_fidelity_100pct(self, pruner: ShellPruner) -> None:
+        """Every exception type in the original must survive in the summary."""
+        text         = _make_python_traceback_chained()
+        summary      = pruner.compress(text)
+        assert summary is not None
+        raw_sigs     = extract_python_exceptions(text)
+        pruned_sigs  = extract_python_exceptions(summary)
+        missing      = raw_sigs - pruned_sigs
+        assert not missing, (
+            f"These exception signatures were lost in compression: {missing}\n"
+            f"Raw sigs: {raw_sigs}\nPruned sigs: {pruned_sigs}"
+        )
