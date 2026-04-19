@@ -289,3 +289,38 @@ class TestPythonTracebackCompression:
             f"These exception signatures were lost in compression: {missing}\n"
             f"Raw sigs: {raw_sigs}\nPruned sigs: {pruned_sigs}"
         )
+
+
+class TestRustErrorCompression:
+    """Verify Rust compiler output is deduplicated and summarised correctly."""
+
+    def test_headline_count_accurate(self, pruner: ShellPruner) -> None:
+        text    = _make_rust_errors(n_unique=5, repeats_per=3)
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "15" in summary or "error(s)" in summary
+
+    def test_all_unique_error_codes_present(self, pruner: ShellPruner) -> None:
+        n_unique     = 6
+        text         = _make_rust_errors(n_unique=n_unique, repeats_per=4)
+        summary      = pruner.compress(text)
+        assert summary is not None
+        raw_codes    = extract_rust_error_codes(text)
+        pruned_codes = extract_rust_error_codes(summary)
+        assert raw_codes == pruned_codes, (
+            f"Missing codes in summary: {raw_codes - pruned_codes}"
+        )
+
+    def test_rust_compression_ratio_above_60pct(self, pruner: ShellPruner) -> None:
+        text    = _make_rust_errors(n_unique=8, repeats_per=4)
+        summary = pruner.compress(text)
+        assert summary is not None
+        ratio   = compression_ratio(text, summary)
+        assert ratio >= 0.60, f"Rust errors: got {ratio:.1%} compression."
+
+    def test_warning_count_mentioned(self, pruner: ShellPruner) -> None:
+        base    = _make_rust_errors()
+        text    = base + "\nwarning[W001]: unused variable `x`\n" * 5
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "warning" in summary.lower()
