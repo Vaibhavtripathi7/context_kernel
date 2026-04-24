@@ -324,3 +324,27 @@ class TestRustErrorCompression:
         summary = pruner.compress(text)
         assert summary is not None
         assert "warning" in summary.lower()
+
+
+class TestGCCErrorCompression:
+    """Verify C/C++ diagnostic deduplication."""
+
+    def test_error_count_in_summary(self, pruner: ShellPruner) -> None:
+        n_files, per_file = 4, 5
+        text    = _make_gcc_errors(n_files=n_files, errors_per_file=per_file)
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "20" in summary or "error(s)" in summary
+
+    def test_first_error_line_preserved(self, pruner: ShellPruner) -> None:
+        text    = _make_gcc_errors(n_files=2, errors_per_file=3)
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "undefined_sym_0" in summary
+
+    def test_gcc_compression_ratio_above_60pct(self, pruner: ShellPruner) -> None:
+        text    = _make_gcc_errors(n_files=5, errors_per_file=8)
+        summary = pruner.compress(text)
+        assert summary is not None
+        ratio   = compression_ratio(text, summary)
+        assert ratio >= 0.60, f"GCC errors: got {ratio:.1%} compression."
