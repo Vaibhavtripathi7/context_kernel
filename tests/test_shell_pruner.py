@@ -348,3 +348,36 @@ class TestGCCErrorCompression:
         assert summary is not None
         ratio   = compression_ratio(text, summary)
         assert ratio >= 0.60, f"GCC errors: got {ratio:.1%} compression."
+
+
+class TestRepetitiveOutputCompression:
+    """Verify frequency-table pruning for repetitive log floods."""
+
+    def test_frequency_table_shows_correct_count(self, pruner: ShellPruner) -> None:
+        text    = _make_log_flood(n_lines=200, n_unique=1)
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "200" in summary
+
+    def test_unique_lines_listed_in_summary(self, pruner: ShellPruner) -> None:
+        text    = _make_log_flood(n_lines=150, n_unique=3)
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "Connection timed out" in summary
+
+    def test_log_flood_compression_ratio_above_80pct(self, pruner: ShellPruner) -> None:
+        text    = _make_log_flood(n_lines=300, n_unique=2)
+        summary = pruner.compress(text)
+        assert summary is not None
+        ratio   = compression_ratio(text, summary)
+        assert ratio >= 0.80, f"Log flood: got {ratio:.1%} compression."
+
+    def test_below_repetition_threshold_not_compressed(self, pruner: ShellPruner) -> None:
+        """9 lines (< minimum 10) should NOT be flagged as repetitive."""
+        text = "\n".join(["same line"] * 9)
+        assert not pruner._is_highly_repetitive(text)  # type: ignore[attr-defined]
+
+    def test_diverse_output_not_flagged_repetitive(self, pruner: ShellPruner) -> None:
+        """50 lines all unique → not repetitive."""
+        text = "\n".join(f"Unique log message number {i}" for i in range(50))
+        assert not pruner._is_highly_repetitive(text)  # type: ignore[attr-defined]
