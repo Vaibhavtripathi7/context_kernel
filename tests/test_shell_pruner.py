@@ -381,3 +381,35 @@ class TestRepetitiveOutputCompression:
         """50 lines all unique → not repetitive."""
         text = "\n".join(f"Unique log message number {i}" for i in range(50))
         assert not pruner._is_highly_repetitive(text)  # type: ignore[attr-defined]
+
+
+class TestEdgeCases:
+    """Guard against crashes on degenerate inputs."""
+
+    def test_empty_string_returns_none(self, pruner: ShellPruner) -> None:
+        assert pruner.compress("") is None
+
+    def test_single_line_no_match_returns_none(self, pruner: ShellPruner) -> None:
+        assert pruner.compress("Build succeeded.\n") is None
+
+    def test_traceback_with_no_user_frames_falls_back_gracefully(
+        self, pruner: ShellPruner
+    ) -> None:
+        text = textwrap.dedent("""\
+            Traceback (most recent call last):
+              File "/home/user/.venv/lib/python3.13/site-packages/pkg/core.py", line 1, in run
+                raise ValueError("oops")
+            ValueError: oops
+        """)
+        summary = pruner.compress(text)
+        assert summary is not None
+        assert "ValueError" in summary
+
+    def test_non_utf8_bytes_handled_via_ansi_stripping(self, pruner: ShellPruner) -> None:
+        latin1_text = (
+            "\x1b[31mTraceback (most recent call last):\x1b[0m\n"
+            '  File "/app/main.py", line 5, in main\n'
+            "RuntimeError: \xe9l\xe8ve (latin-1 encoded é)\n"
+        )
+        result = pruner.compress(latin1_text)
+        assert result is None or isinstance(result, str)
