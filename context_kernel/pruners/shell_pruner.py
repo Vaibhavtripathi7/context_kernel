@@ -49,7 +49,7 @@ class ShellPruner(BasePruner):
         version="0.1.0",
     )
 
-    def __init__(self, dedup_threshold: float = 0.6, max_rust_errors: int = 10) -> None:
+    def __init__(self, dedup_threshold: float = 0.6, max_rust_errors: int = 30) -> None:
         self.dedup_threshold = dedup_threshold
         self.max_rust_errors = max_rust_errors
 
