@@ -60,3 +60,73 @@ _PROMPT_BYTES: tuple[bytes, ...] = (
 )
 _PROMPT_TAIL_CHARS = frozenset("?:>")
 _PROMPT_MAX_LINE_LEN = 120
+
+
+class Orchestrator:
+    """Intercepts an agent's PTY output and runs it through the pruners.
+
+    pruners are tried in order and the first match wins; an empty list
+    means everything passes through untouched. storage must already be
+    open. stats_callback and text_callback are optional hooks used by
+    the TUI to mirror live metrics and output.
+    """
+
+    def __init__(
+        self,
+        command:        list[str],
+        session_id:     str,
+        storage:        StorageEngine,
+        pruners:        list[BasePruner] | None = None,
+        config:         OrchestratorConfig | None = None,
+        stats_callback: Callable[[OrchestratorStats], None] | None = None,
+    ) -> None:
+        if not command:
+            raise ValueError("command must be a non-empty list of strings")
+
+        self.command        = command
+        self.session_id     = session_id
+        self.storage        = storage
+        self.pruners:list[BasePruner] = pruners or []
+        self.config         = config or OrchestratorConfig()
+        self.stats_callback = stats_callback
+        self.text_callback: Callable[[str], None] | None = None
+
+        self._stats               = OrchestratorStats()
+        self._child_pid:           int | None = None
+        self._master_fd:           int | None = None
+        self._buffer:              list[bytes]   = []
+        self._last_data_monotonic: float         = 0.0
+        self._saved_tty:           list[Any] | None = None
+
+    @property
+    def stats(self) -> OrchestratorStats:
+        return self._stats
+
+    def add_pruner(self, pruner: BasePruner) -> None:
+        self.pruners.append(pruner)
+
+    def run(self) -> int:
+        """Spawn the agent, block until it exits, and return its exit code.
+
+        The terminal is always restored, even if the child crashes.
+        """
+        self._master_fd, child_pid = self._spawn_in_pty()
+        self._child_pid = child_pid
+
+        self._enter_raw_mode()
+        self._install_sigwinch_handler()
+
+        try:
+            return self._io_loop(child_pid)
+        finally:
+            self._restore_terminal()
+            if self._master_fd is not None:
+                try:
+                    os.close(self._master_fd)
+                except OSError:
+                    pass
+                self._master_fd = None
+            self.storage.close_session(
+                self.session_id,
+                tokens_saved=self._stats.tokens_saved,
+            )
