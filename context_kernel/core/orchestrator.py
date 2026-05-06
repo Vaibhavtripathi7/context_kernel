@@ -130,3 +130,92 @@ class Orchestrator:
                 self.session_id,
                 tokens_saved=self._stats.tokens_saved,
             )
+
+    def _spawn_in_pty(self) -> tuple[int, int]:
+        """Fork the agent into a fresh PTY; return (master_fd, child_pid)."""
+        master_fd, slave_fd = pty.openpty()
+
+        if sys.stdout.isatty():
+            rows, cols = self._get_terminal_size()
+            self._set_winsize(slave_fd, rows, cols)
+
+        child_pid = os.fork()
+
+        if child_pid == 0:
+            os.setsid()
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+            os.dup2(slave_fd, sys.stdin.fileno())
+            os.dup2(slave_fd, sys.stdout.fileno())
+            os.dup2(slave_fd, sys.stderr.fileno())
+
+            if slave_fd > 2:
+                os.close(slave_fd)
+            os.close(master_fd)
+
+            os.execvp(self.command[0], self.command)
+            os._exit(127)
+
+        os.close(slave_fd)
+        return master_fd, child_pid
+
+    def _io_loop(self, child_pid: int) -> int:
+        assert self._master_fd is not None
+        master_fd = self._master_fd
+        stdin_fd  = sys.stdin.fileno()
+        stdout_fd = sys.stdout.fileno()
+        exit_code = 0
+
+        while True:
+            try:
+                rlist, _, _ = select.select(
+                    [master_fd, stdin_fd],
+                    [],
+                    [],
+                    _SELECT_TIMEOUT,
+                )
+            except InterruptedError:
+                continue
+            except (ValueError, OSError):
+                break
+
+            if master_fd in rlist:
+                try:
+                    chunk = os.read(master_fd, self.config.read_chunk_bytes)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break
+                self._stats.total_bytes_read += len(chunk)
+                self._last_data_monotonic = time.monotonic()
+                self._accumulate(chunk)
+                self._flush_buffer(stdout_fd, force=False)
+
+            if stdin_fd in rlist:
+                try:
+                    keys = os.read(stdin_fd, 256)
+                except OSError:
+                    keys = b""
+                if keys:
+                    try:
+                        os.write(master_fd, keys)
+                    except OSError:
+                        pass
+
+            elapsed_since_data = time.monotonic() - self._last_data_monotonic
+            if (
+                self._buffer
+                and elapsed_since_data >= self.config.buffer_flush_timeout
+            ):
+                self._flush_buffer(stdout_fd, force=True)
+
+        if self._buffer:
+            self._flush_buffer(stdout_fd, force=True)
+
+        try:
+            _, status = os.waitpid(child_pid, 0)
+            exit_code = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:
+            exit_code = 0
+
+        return exit_code
