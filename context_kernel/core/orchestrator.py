@@ -219,3 +219,104 @@ class Orchestrator:
             exit_code = 0
 
         return exit_code
+
+    def _accumulate(self, chunk: bytes) -> None:
+        self._buffer.append(chunk)
+
+        if self._tail_is_prompt(chunk):
+            self._flush_buffer(sys.stdout.fileno(), force=True)
+
+    def _flush_buffer(self, stdout_fd: int, *, force: bool = False) -> None:
+        """Emit the buffered output, pruning it first if it qualifies.
+
+        force controls only *whether to emit now* (silence timeout / EOF),
+        never *whether to prune*: output below pruning_threshold_lines and
+        interactive prompts always pass through verbatim.
+        """
+        if not self._buffer:
+            return
+
+        raw: bytes = b"".join(self._buffer)
+        self._buffer.clear()
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+
+        line_count = len(text.splitlines(keepends=True))
+
+        below_threshold = line_count < self.config.pruning_threshold_lines
+        if not force and below_threshold:
+            self._buffer.append(raw)
+            return
+
+        if below_threshold or self._text_is_prompt(text):
+            self._emit(stdout_fd, raw)
+            self._persist(text, pruned=False)
+            if self.text_callback is not None:
+                self.text_callback(text)
+            return
+
+        summary: str | None = None
+        for pruner in self.pruners:
+            if pruner.matches(text):
+                result = pruner.compress(text)
+                if result is not None:
+                    summary = result
+                    saved = max(0, (len(text) - len(summary)) // 4)
+                    self._stats.tokens_saved      += saved
+                    self._stats.total_pruner_hits += 1
+                    break
+
+        if summary is not None:
+            self._persist(text, pruned=True, summary=summary)
+            injection = self._format_injection(summary, line_count)
+            injected  = injection.encode("utf-8")
+            self._stats.total_bytes_injected += len(injected)
+            self._emit(stdout_fd, injected)
+            _display = injection
+        else:
+            self._emit(stdout_fd, raw)
+            self._persist(text, pruned=False)
+            _display = text
+
+        if self.text_callback is not None:
+            self.text_callback(_display)
+
+        if self.stats_callback is not None:
+            self.stats_callback(self._stats)
+
+    def _emit(self, fd: int, data: bytes) -> None:
+        offset = 0
+        while offset < len(data):
+            try:
+                offset += os.write(fd, data[offset:])
+            except OSError:
+                break
+
+    def _persist(self, text: str, *, pruned: bool, summary: str = "") -> None:
+        entry = LogEntry(
+            session_id=self.session_id,
+            raw_content=text,
+            entry_type="stdout",
+            compressed_summary=summary,
+            token_estimate=max(0, len(text) // 4),
+            was_pruned=pruned,
+        )
+        try:
+            self.storage.insert_entry(entry)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _format_injection(self, summary: str, original_lines: int) -> str:
+        body = f"{_CYAN}{summary}{_RESET}\n"
+        if not self.config.annotate_injections:
+            return body
+
+        summary_lines = len(summary.splitlines())
+        banner = (
+            f"{_DIM}[ACK] Compressed {original_lines} lines → "
+            f"{summary_lines} lines  (full log stored in DB){_RESET}\n"
+        )
+        return banner + body
