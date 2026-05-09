@@ -320,3 +320,51 @@ class Orchestrator:
             f"{summary_lines} lines  (full log stored in DB){_RESET}\n"
         )
         return banner + body
+
+    def _tail_is_prompt(self, chunk: bytes) -> bool:
+        tail = chunk[-200:]
+        return any(p in tail for p in _PROMPT_BYTES)
+
+    def _text_is_prompt(self, text: str) -> bool:
+        stripped = text.rstrip()
+        if stripped and stripped[-1] in _PROMPT_TAIL_CHARS:
+            last_line = stripped.rsplit("\n", 1)[-1]
+            if len(last_line) <= _PROMPT_MAX_LINE_LEN:
+                return True
+        tail_bytes = text[-200:].encode("utf-8", errors="replace")
+        return any(p in tail_bytes for p in _PROMPT_BYTES)
+
+    def _enter_raw_mode(self) -> None:
+        if not sys.stdin.isatty():
+            return
+        self._saved_tty = termios.tcgetattr(sys.stdin.fileno())
+        tty.setraw(sys.stdin.fileno())
+
+    def _restore_terminal(self) -> None:
+        if self._saved_tty is not None and sys.stdin.isatty():
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self._saved_tty)
+            self._saved_tty = None
+
+    def _install_sigwinch_handler(self) -> None:
+        def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
+            if self._master_fd is not None and sys.stdout.isatty():
+                rows, cols = self._get_terminal_size()
+                self._set_winsize(self._master_fd, rows, cols)
+
+        signal.signal(signal.SIGWINCH, _handler)
+
+    @staticmethod
+    def _get_terminal_size() -> tuple[int, int]:
+        try:
+            cols, rows = os.get_terminal_size(sys.stdout.fileno())
+            return rows, cols
+        except OSError:
+            return 24, 80
+
+    @staticmethod
+    def _set_winsize(fd: int, rows: int, cols: int) -> None:
+        packed = struct.pack("HHHH", rows, cols, 0, 0)
+        try:
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
+        except OSError:
+            pass
