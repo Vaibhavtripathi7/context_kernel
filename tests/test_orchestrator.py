@@ -83,3 +83,48 @@ def _read_pipe(r_fd: int, timeout: float = 0.5) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+class TestPromptDetection:
+    """
+    Verify _text_is_prompt and _tail_is_prompt correctly identify
+    interactive prompts vs. normal output.
+
+    Prompts must NEVER be pruned — if an agent is waiting for Y/N and ACK
+    swallows the question, the entire session hangs.
+    """
+
+    def test_yn_prompt_text(self, orch: Orchestrator) -> None:
+        assert orch._text_is_prompt("Overwrite existing file? [Y/n] ")  # type: ignore[attr-defined]
+
+    def test_yn_capital_prompt(self, orch: Orchestrator) -> None:
+        assert orch._text_is_prompt("Confirm deletion? [Y/N] ")  # type: ignore[attr-defined]
+
+    def test_yes_no_long_form_prompt(self, orch: Orchestrator) -> None:
+        assert orch._text_is_prompt("Continue with this action? (yes/no) ")  # type: ignore[attr-defined]
+
+    def test_question_mark_tail_detected(self, orch: Orchestrator) -> None:
+        assert orch._text_is_prompt("Are you sure?")  # type: ignore[attr-defined]
+
+    def test_colon_tail_detected(self, orch: Orchestrator) -> None:
+        assert orch._text_is_prompt("Enter API key: ")  # type: ignore[attr-defined]
+
+    def test_normal_multiline_output_not_prompt(self, orch: Orchestrator) -> None:
+        text = "Building project...\nCompiling module A\nCompiling module B\nDone.\n"
+        assert not orch._text_is_prompt(text)  # type: ignore[attr-defined]
+
+    def test_stack_trace_not_prompt(self, orch: Orchestrator) -> None:
+        text = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/main.py", line 5, in main\n'
+            "ValueError: bad input\n"
+        )
+        assert not orch._text_is_prompt(text)  # type: ignore[attr-defined]
+
+    def test_tail_bytes_prompt_detection(self, orch: Orchestrator) -> None:
+        chunk = b"Some preamble...\nAre you sure? [Y/n] "
+        assert orch._tail_is_prompt(chunk)  # type: ignore[attr-defined]
+
+    def test_tail_bytes_non_prompt(self, orch: Orchestrator) -> None:
+        chunk = b"error: undefined reference to `main'\n"
+        assert not orch._tail_is_prompt(chunk)  # type: ignore[attr-defined]
