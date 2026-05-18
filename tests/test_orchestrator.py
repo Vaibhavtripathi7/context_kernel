@@ -128,3 +128,29 @@ class TestPromptDetection:
     def test_tail_bytes_non_prompt(self, orch: Orchestrator) -> None:
         chunk = b"error: undefined reference to `main'\n"
         assert not orch._tail_is_prompt(chunk)  # type: ignore[attr-defined]
+
+
+class TestInjectionFormatting:
+    """Verify the annotation envelope wrapping pruner summaries."""
+
+    def test_annotation_banner_present_when_enabled(self, storage: StorageEngine) -> None:
+        orch = _make_orchestrator(storage, annotate=True)
+        result = orch._format_injection("short summary", original_lines=80)  # type: ignore[attr-defined]
+        assert "[ACK]" in result
+        assert "80" in result
+
+    def test_annotation_banner_absent_when_disabled(self, storage: StorageEngine) -> None:
+        orch = _make_orchestrator(storage, annotate=False)
+        result = orch._format_injection("short summary", original_lines=80)  # type: ignore[attr-defined]
+        assert "[ACK]" not in result
+
+    def test_summary_text_always_in_output(self, storage: StorageEngine) -> None:
+        orch = _make_orchestrator(storage, annotate=True)
+        result = orch._format_injection("ValueError: bad arg\n  at app/main.py:5", 30)  # type: ignore[attr-defined]
+        assert "ValueError: bad arg" in result
+
+    def test_no_annotate_output_is_just_summary(self, storage: StorageEngine) -> None:
+        orch   = _make_orchestrator(storage, annotate=False)
+        result = orch._format_injection("my summary", 10)  # type: ignore[attr-defined]
+        assert "[ACK]" not in result
+        assert "my summary" in result
