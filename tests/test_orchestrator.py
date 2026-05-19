@@ -307,3 +307,53 @@ class TestBufferFlush:
         assert orch.stats.total_pruner_hits == 1
         assert orch.stats.tokens_saved > 0
         assert orch.stats.tokens_saved == (len(original_text) - len(summary_text)) // 4
+
+
+class TestStatsTracking:
+    """Verify the OrchestratorStats counters accumulate correctly."""
+
+    def test_stats_initial_state(self, orch: Orchestrator) -> None:
+        s = orch.stats
+        assert s.total_bytes_read     == 0
+        assert s.total_bytes_injected == 0
+        assert s.total_pruner_hits    == 0
+        assert s.tokens_saved         == 0
+
+    def test_bytes_read_accumulates(
+        self, storage: StorageEngine, pipe_pair: tuple[int, int]
+    ) -> None:
+        r_fd, w_fd = pipe_pair
+        orch = _make_orchestrator(storage, threshold=1)
+        chunk = b"x" * 256
+        orch._accumulate(chunk)  # type: ignore[attr-defined]
+        orch._stats.total_bytes_read += len(chunk)
+        assert orch.stats.total_bytes_read == 256
+
+    def test_stats_callback_called_after_prune(
+        self, storage: StorageEngine, pipe_pair: tuple[int, int]
+    ) -> None:
+        r_fd, w_fd = pipe_pair
+        received: list[OrchestratorStats] = []
+
+        class AnyPruner(BasePruner):
+            metadata = PrunerMetadata("any", "always prunes")
+            def matches(self, text: str) -> bool:
+                return True
+            def compress(self, text: str) -> Optional[str]:
+                return "summary"
+
+        session = storage.create_session("callback-test")
+        orch = Orchestrator(
+            command=["echo"],
+            session_id=session.session_id,
+            storage=storage,
+            pruners=[AnyPruner()],
+            config=OrchestratorConfig(pruning_threshold_lines=1),
+            stats_callback=received.append,
+        )
+        orch._buffer = [b"line1\nline2\n"]
+
+        orch._flush_buffer(w_fd, force=True)  # type: ignore[attr-defined]
+
+        assert len(received) >= 1, "stats_callback must be called after a prune event."
+        assert received[-1].total_pruner_hits >= 1
