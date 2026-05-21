@@ -357,3 +357,193 @@ class TestStatsTracking:
 
         assert len(received) >= 1, "stats_callback must be called after a prune event."
         assert received[-1].total_pruner_hits >= 1
+
+
+class TestOrchestratorIntegration:
+    """
+    End-to-end integration tests that launch a real child process.
+
+    Each test writes a self-contained driver script and runs it via
+    subprocess.run so that os.fork() + pty.openpty() happen in
+    a clean process with no pytest state.  We assert on the DB stats that
+    the driver script prints to stdout.
+    """
+
+    def _run_driver(self, script_content: str, tmp_path: Path, timeout: int = 20) -> str:
+        """Write a driver script and run it, returning its stdout."""
+        script_path = tmp_path / "_driver.py"
+        script_path.write_text(textwrap.dedent(script_content))
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(PROJECT_ROOT),
+        )
+        assert result.returncode == 0, (
+            f"Driver script failed (rc={result.returncode}):\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+        return result.stdout
+
+    @pytest.mark.integration
+    def test_orchestrator_captures_echo_output(self, tmp_path: Path) -> None:
+        """
+        Spawn python3 -c "print(...)" via ACK and verify the output is
+        persisted to the database.
+        """
+        db_path = tmp_path / "integration_echo.db"
+        driver  = textwrap.dedent(f"""\
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, r"{PROJECT_ROOT}")
+            from context_kernel.memory.storage import StorageEngine
+            from context_kernel.core.orchestrator import Orchestrator, OrchestratorConfig
+
+            db = StorageEngine(db_path=Path(r"{db_path}"))
+            db.open()
+            session = db.create_session("integration-echo")
+
+            orch = Orchestrator(
+                command=[r"{sys.executable}", "-c", "print('hello from ack integration')"],
+                session_id=session.session_id,
+                storage=db,
+                config=OrchestratorConfig(
+                    pruning_threshold_lines=200,
+                    buffer_flush_timeout=0.05,
+                ),
+            )
+            orch.run()
+
+            stats   = db.stats(session.session_id)
+            entries = db.get_recent_entries(session.session_id, limit=10)
+            combined = " ".join(r["raw_content"] for r in entries)
+            print(f"entries={{stats['total_entries']}}")
+            print(f"contains_hello={{('hello from ack integration' in combined)}}")
+            db.close()
+        """)
+        out = self._run_driver(driver, tmp_path)
+        assert "entries=1"           in out, f"Expected 1 DB entry.\nGot: {out}"
+        assert "contains_hello=True" in out, f"Expected 'hello from ack integration' in DB.\nGot: {out}"
+
+    @pytest.mark.integration
+    def test_orchestrator_pruner_fires_on_large_output(self, tmp_path: Path) -> None:
+        """
+        Spawn a script that emits a 60-line Python traceback.  The
+        ShellPruner must fire and DB entries must show was_pruned=True.
+        """
+        db_path    = tmp_path / "integration_prune.db"
+        agent_path = tmp_path / "big_traceback_agent.py"
+        agent_path.write_text(textwrap.dedent("""\
+            import sys
+            lines = ["Traceback (most recent call last):"]
+            for i in range(35):
+                lines.append(f'  File "/app/module_{i}.py", line {i+1}, in fn')
+                lines.append(f"    do_something({i})")
+            lines.append("ValueError: injected integration error")
+            sys.stdout.write("\\n".join(lines) + "\\n")
+            sys.stdout.flush()
+        """))
+
+        driver = textwrap.dedent(f"""\
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, r"{PROJECT_ROOT}")
+            from context_kernel.memory.storage import StorageEngine
+            from context_kernel.core.orchestrator import Orchestrator, OrchestratorConfig
+            from context_kernel.pruners.shell_pruner import ShellPruner
+
+            db = StorageEngine(db_path=Path(r"{db_path}"))
+            db.open()
+            session = db.create_session("integration-prune")
+
+            orch = Orchestrator(
+                command=[r"{sys.executable}", r"{agent_path}"],
+                session_id=session.session_id,
+                storage=db,
+                pruners=[ShellPruner()],
+                config=OrchestratorConfig(
+                    pruning_threshold_lines=20,
+                    buffer_flush_timeout=0.05,
+                    annotate_injections=False,
+                ),
+            )
+            orch.run()
+
+            stats = db.stats(session.session_id)
+            print(f"pruner_hits={{orch.stats.total_pruner_hits}}")
+            print(f"tokens_saved={{orch.stats.tokens_saved}}")
+            print(f"pruned_entries={{stats['pruned_entries']}}")
+            db.close()
+        """)
+        out = self._run_driver(driver, tmp_path)
+        assert "pruner_hits=1" in out, f"Pruner did not fire.\nOutput:\n{out}"
+        tokens_line = [ln for ln in out.splitlines() if ln.startswith("tokens_saved=")]
+        assert tokens_line, f"tokens_saved line missing.\nOutput:\n{out}"
+        saved = int(tokens_line[0].split("=")[1])
+        assert saved > 0, f"Expected tokens_saved > 0, got {saved}."
+
+    @pytest.mark.integration
+    def test_orchestrator_exit_code_propagated(self, tmp_path: Path) -> None:
+        """
+        The orchestrator must propagate the child's exit code exactly.
+        We run a script that exits with code 42 and verify the driver gets 42.
+        """
+        db_path = tmp_path / "integration_exit.db"
+        driver  = textwrap.dedent(f"""\
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, r"{PROJECT_ROOT}")
+            from context_kernel.memory.storage import StorageEngine
+            from context_kernel.core.orchestrator import Orchestrator, OrchestratorConfig
+
+            db = StorageEngine(db_path=Path(r"{db_path}"))
+            db.open()
+            session = db.create_session("exit-code-test")
+
+            orch = Orchestrator(
+                command=[r"{sys.executable}", "-c", "import sys; sys.exit(42)"],
+                session_id=session.session_id,
+                storage=db,
+                config=OrchestratorConfig(buffer_flush_timeout=0.05),
+            )
+            code = orch.run()
+            print(f"exit_code={{code}}")
+            db.close()
+        """)
+        out = self._run_driver(driver, tmp_path)
+        assert "exit_code=42" in out, (
+            f"Expected exit_code=42 to be printed by the driver.\nGot: {out}"
+        )
+
+    @pytest.mark.integration
+    def test_orchestrator_restores_terminal_after_run(self, tmp_path: Path) -> None:
+        """
+        After run() completes, the driver process must be able to print
+        normally — proof that the terminal was restored from raw mode.
+        """
+        db_path = tmp_path / "integration_tty.db"
+        driver  = textwrap.dedent(f"""\
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, r"{PROJECT_ROOT}")
+            from context_kernel.memory.storage import StorageEngine
+            from context_kernel.core.orchestrator import Orchestrator, OrchestratorConfig
+
+            db = StorageEngine(db_path=Path(r"{db_path}"))
+            db.open()
+            session = db.create_session("tty-restore-test")
+
+            orch = Orchestrator(
+                command=[r"{sys.executable}", "-c", "print('done')"],
+                session_id=session.session_id,
+                storage=db,
+                config=OrchestratorConfig(buffer_flush_timeout=0.05),
+            )
+            orch.run()
+            print("terminal_ok=True")
+            db.close()
+        """)
+        out = self._run_driver(driver, tmp_path)
+        assert "terminal_ok=True" in out
