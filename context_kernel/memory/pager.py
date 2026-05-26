@@ -181,3 +181,65 @@ class Pager:
                                 raw = expr.text.decode("utf-8", errors="replace")
                                 return str(raw).strip("\"'").strip()
         return ""
+
+    _CLASS_RE = re.compile(r"^class\s+(\w+)")
+    _DEF_RE   = re.compile(r"^(\s*)def\s+(\w+)")
+
+    def _parse_with_regex(
+        self,
+        path: Path,
+        source: bytes,
+        file_hash: str,
+    ) -> FileSymbolMap:
+        text  = source.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        symbols: list[SymbolEntry] = []
+
+        current_class: str | None = None
+
+        for lineno, line in enumerate(lines, start=1):
+            m_class = self._CLASS_RE.match(line)
+            if m_class:
+                if current_class and symbols:
+                    for i in range(len(symbols) - 1, -1, -1):
+                        if symbols[i].name == current_class and symbols[i].kind == "class":
+                            symbols[i] = SymbolEntry(
+                                name=symbols[i].name,
+                                kind=symbols[i].kind,
+                                start_line=symbols[i].start_line,
+                                end_line=lineno - 1,
+                                docstring=symbols[i].docstring,
+                                parent=symbols[i].parent,
+                            )
+                            break
+
+                current_class = m_class.group(1)
+                symbols.append(SymbolEntry(
+                    name=current_class,
+                    kind="class",
+                    start_line=lineno,
+                    end_line=len(lines),
+                    parent="",
+                ))
+                continue
+
+            m_def = self._DEF_RE.match(line)
+            if m_def:
+                indent = len(m_def.group(1))
+                name   = m_def.group(2)
+                is_method = (indent > 0 and current_class is not None)
+                symbols.append(SymbolEntry(
+                    name=name,
+                    kind="method" if is_method else "function",
+                    start_line=lineno,
+                    end_line=lineno,
+                    parent=current_class if is_method and current_class else "",
+                ))
+
+        return FileSymbolMap(
+            path=path,
+            language="python",
+            symbols=symbols,
+            file_hash=file_hash,
+            line_count=len(lines),
+        )
