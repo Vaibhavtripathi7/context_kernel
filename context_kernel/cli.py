@@ -143,3 +143,73 @@ class AckDashboard(App[int]):
 
     async def action_quit(self) -> None:
         self.exit(0)
+
+
+@click.group()
+@click.version_option(version="0.1.0", prog_name="ack")
+def main() -> None:
+    """ACK — context-pruning proxy for terminal AI agents."""
+
+
+@main.command(name="run")
+@click.argument("agent_command", nargs=-1, required=True)
+@click.option(
+    "--db",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Path to the ACK SQLite database.",
+)
+@click.option(
+    "--prune-threshold",
+    "prune_threshold",
+    default=30,
+    show_default=True,
+    type=int,
+    help="Output lines before pruner activates.",
+)
+@click.option(
+    "--no-annotate",
+    "no_annotate",
+    is_flag=True,
+    default=False,
+    help="Suppress [ACK] banners in the stream.",
+)
+@click.option(
+    "--tui/--no-tui",
+    default=False,
+    show_default=True,
+    help="Launch the Textual stats dashboard (experimental).",
+)
+def cmd_run(
+    agent_command:   tuple[str, ...],
+    db:              Path | None,
+    prune_threshold: int,
+    no_annotate:     bool,
+    tui:             bool,
+) -> None:
+    """Wrap AGENT_COMMAND with ACK's PTY interceptor.
+
+    Example: ack run -- aider --model gpt-4o
+    """
+    storage = StorageEngine(db_path=db) if db else StorageEngine()
+    storage.open()
+
+    session = storage.create_session(agent_command=" ".join(agent_command))
+
+    config = OrchestratorConfig(
+        pruning_threshold_lines=prune_threshold,
+        annotate_injections=not no_annotate,
+    )
+    orch = Orchestrator(
+        command=list(agent_command),
+        session_id=session.session_id,
+        storage=storage,
+        pruners=[ShellPruner()],
+        config=config,
+    )
+
+    if tui:
+        exit_code = AckDashboard(orchestrator=orch).run()
+        sys.exit(exit_code or 0)
+    else:
+        sys.exit(orch.run())
