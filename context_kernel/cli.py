@@ -213,3 +213,106 @@ def cmd_run(
         sys.exit(exit_code or 0)
     else:
         sys.exit(orch.run())
+
+
+@main.command(name="search")
+@click.argument("query")
+@click.option(
+    "--session",
+    "session_id",
+    default=None,
+    metavar="SESSION_ID",
+    help="Restrict search to a specific session UUID.",
+)
+@click.option(
+    "--limit",
+    default=20,
+    show_default=True,
+    type=int,
+    help="Maximum number of results.",
+)
+@click.option(
+    "--db",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Path to the ACK SQLite database.",
+)
+def cmd_search(
+    query:      str,
+    session_id: str | None,
+    limit:      int,
+    db:         Path | None,
+) -> None:
+    """Full-text search over stored agent output (QUERY is an FTS5 expression)."""
+    storage = StorageEngine(db_path=db) if db else StorageEngine()
+    with storage:
+        rows = storage.search(query, session_id=session_id, limit=limit)
+
+    if not rows:
+        click.echo(f"No results for: {query!r}")
+        return
+
+    for row in rows:
+        sid_short = row["session_id"][:8]
+        etype     = row["entry_type"]
+        ts        = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["timestamp"]))
+        pruned    = " [pruned]" if row["was_pruned"] else ""
+        click.echo(click.style(f"[{ts}] session={sid_short}… type={etype}{pruned}", fg="cyan"))
+
+        content: str = row["compressed_summary"] or row["raw_content"]
+        preview = content[:300].strip()
+        if len(content) > 300:
+            preview += "\n  …"
+        click.echo(f"  {preview}\n")
+
+
+@main.command(name="toc")
+@click.argument("file", type=click.Path(exists=True, path_type=Path))
+def cmd_toc(file: Path) -> None:
+    """Print the symbol table-of-contents for a source FILE."""
+    pager = Pager()
+    try:
+        fmap = pager.map_file(file)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"Error parsing {file}: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(fmap.to_toc())
+
+
+@main.command(name="sessions")
+@click.option(
+    "--limit",
+    default=20,
+    show_default=True,
+    type=int,
+    help="Number of sessions to list.",
+)
+@click.option(
+    "--db",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Path to the ACK SQLite database.",
+)
+def cmd_sessions(limit: int, db: Path | None) -> None:
+    """List recent ACK sessions."""
+    storage = StorageEngine(db_path=db) if db else StorageEngine()
+    with storage:
+        rows = storage.list_sessions(limit=limit)
+
+    if not rows:
+        click.echo("No sessions found.")
+        return
+
+    click.echo(f"{'SESSION ID':<38}  {'STARTED':<20}  {'CMD'}")
+    click.echo("─" * 90)
+    for row in rows:
+        sid   = row["session_id"]
+        cmd   = row["agent_command"][:40]
+        ts    = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["started_at"]))
+        ended = " ✓" if row["ended_at"] else " …"
+        click.echo(f"{sid}  {ts}  {cmd}{ended}")
+
+
+if __name__ == "__main__":
+    main()
