@@ -180,3 +180,65 @@ def gen_mixed_realistic(seed: int = 0) -> str:
         exception_msg="assert charge_amount == refund_amount: 99.99 != 100.00",
     )
     return preamble + tb
+
+
+def extract_signatures(text: str) -> set[str]:
+    """
+    Pull every actionable error signature from a text blob.
+
+    An 'actionable signature' is anything an LLM agent needs to identify
+    and fix the root cause:
+      • Python: ExceptionType: message lines
+      • Rust:   error[E####] codes
+      • GCC:    filename.cpp:line:col: error: message headlines
+    """
+    sigs: set[str] = set()
+
+    for m in re.finditer(r"(\w+(?:Error|Exception|Warning)):\s*(.{1,60})", text):
+        sigs.add(f"{m.group(1)}:{m.group(2).strip()[:40]}")
+
+    for m in re.finditer(r"(error\[E\d+\]):", text):
+        sigs.add(m.group(1))
+
+    for m in re.finditer(
+        r"\S+\.(?:c|cpp):\d+:\d+: error: (.{1,60})", text
+    ):
+        sigs.add(f"gcc:{m.group(1).strip()[:40]}")
+
+    return sigs
+
+
+@dataclass
+class ItemResult:
+    """Per-corpus-item benchmark results."""
+
+    name:              str
+    naked_chars:       int
+    proxied_chars:     int
+    naked_tokens:      int
+    proxied_tokens:    int
+    compression_ratio: float
+    naked_sigs:        int
+    preserved_sigs:    int
+    fidelity_ratio:    float
+    pruner_fired:      bool
+    duration_ms:       float
+
+
+@dataclass
+class SuiteResult:
+    """Aggregate result for one benchmark suite."""
+
+    suite_name:         str
+    items:              list[ItemResult]    = field(default_factory=list)
+    mean_compression:   float              = 0.0
+    p10_compression:    float              = 0.0
+    p50_compression:    float              = 0.0
+    p90_compression:    float              = 0.0
+    std_compression:    float              = 0.0
+    mean_fidelity:      float              = 0.0
+    min_fidelity:       float              = 1.0
+    total_naked_tokens: int                = 0
+    total_pruned_tokens:int                = 0
+    overall_compression:float              = 0.0
+    passed:             bool               = False
