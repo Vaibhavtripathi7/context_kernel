@@ -451,3 +451,209 @@ class BenchmarkRunner:
             f"  Mean sig fidelity    : {suite.mean_fidelity:.1%}  "
             f"(worst={suite.min_fidelity:.0%})"
         )
+
+
+def traceback_corpus() -> list[tuple[str, str]]:
+    """Corpus of Python traceback payloads at varying depths."""
+    return [
+        ("shallow_traceback_5f",      gen_python_traceback(n_user_frames=2,  n_stdlib_frames=3)),
+        ("medium_traceback_20f",      gen_python_traceback(n_user_frames=3,  n_stdlib_frames=17)),
+        ("deep_traceback_40f",        gen_python_traceback(n_user_frames=3,  n_stdlib_frames=37)),
+        ("massive_traceback_60f",     gen_python_traceback(n_user_frames=4,  n_stdlib_frames=56)),
+        ("chained_2x",                gen_chained_tracebacks(n_chains=2)),
+        ("chained_3x",                gen_chained_tracebacks(n_chains=3)),
+        ("keyerror_traceback", gen_python_traceback(
+            exception_class="KeyError", exception_msg="'user_id'")),
+        ("attributeerror_traceback", gen_python_traceback(
+            exception_class="AttributeError",
+            exception_msg="'NoneType' object has no attribute 'id'")),
+        ("typeerror_traceback", gen_python_traceback(
+            exception_class="TypeError",
+            exception_msg="unsupported operand type(s) for +: 'int' and 'str'")),
+        ("importerror_traceback", gen_python_traceback(
+            exception_class="ImportError",
+            exception_msg="cannot import name 'BaseModel' from 'pydantic'")),
+    ]
+
+
+def build_error_corpus() -> list[tuple[str, str]]:
+    """Corpus of Rust and GCC build failure payloads."""
+    return [
+        ("rust_small_5u_3r",    gen_rust_build_failure(n_unique_errors=5, repetitions_per_error=3)),
+        ("rust_medium_10u_4r", gen_rust_build_failure(n_unique_errors=10, repetitions_per_error=4)),
+        ("rust_large_15u_5r", gen_rust_build_failure(n_unique_errors=15, repetitions_per_error=5)),
+        ("rust_massive_20u_6r", gen_rust_build_failure(
+            n_unique_errors=20, repetitions_per_error=6)),
+        ("gcc_small_3tu_4e",    gen_gcc_build_failure(n_translation_units=3, errors_per_tu=4)),
+        ("gcc_medium_6tu_7e",   gen_gcc_build_failure(n_translation_units=6, errors_per_tu=7)),
+        ("gcc_large_10tu_8e",   gen_gcc_build_failure(n_translation_units=10, errors_per_tu=8)),
+    ]
+
+
+def log_flood_corpus() -> list[tuple[str, str]]:
+    """Corpus of repetitive log output at varying sizes."""
+    return [
+        ("flood_100l_2u",  gen_log_flood(100, 2)),
+        ("flood_200l_3u",  gen_log_flood(200, 3)),
+        ("flood_300l_2u",  gen_log_flood(300, 2)),
+        ("flood_500l_3u",  gen_log_flood(500, 3)),
+        ("flood_1000l_2u", gen_log_flood(1000, 2)),
+    ]
+
+
+def mixed_corpus() -> list[tuple[str, str]]:
+    """Corpus of realistic mixed output (normal lines + traceback mid-stream)."""
+    return [
+        (f"mixed_realistic_{i}", gen_mixed_realistic(seed=i))
+        for i in range(6)
+    ]
+
+
+def _percentile(data: list[float], p: int) -> float:
+    """Simple percentile via linear interpolation."""
+    if not data:
+        return 0.0
+    sorted_data = sorted(data)
+    idx_float   = (p / 100) * (len(sorted_data) - 1)
+    lo, hi      = int(idx_float), min(int(idx_float) + 1, len(sorted_data) - 1)
+    frac        = idx_float - lo
+    return sorted_data[lo] * (1 - frac) + sorted_data[hi] * frac
+
+
+def _hline(width: int = 90) -> None:
+    print("─" * width)
+
+
+def _banner(text: str) -> None:
+    _hline()
+    print(f"  {ANSI_BOLD}{ANSI_CYAN}{text}{ANSI_RESET}")
+    _hline()
+
+
+SUITES: dict[str, tuple[str, list[tuple[str, str]]]] = {
+    "traceback": ("Python Traceback Compression",  traceback_corpus()),
+    "build":     ("Rust + GCC Build Error Pruning", build_error_corpus()),
+    "flood":     ("Log Flood Deduplication",         log_flood_corpus()),
+    "mixed":     ("Mixed Realistic Output",          mixed_corpus()),
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="ACK benchmark: token compression and signature fidelity."
+    )
+    parser.add_argument(
+        "--suite",
+        choices=list(SUITES) + ["all"],
+        default="all",
+        help="Which corpus suite to benchmark (default: all).",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_COMPRESSION_THRESHOLD,
+        metavar="RATIO",
+        help=f"Minimum compression ratio to pass (default: {DEFAULT_COMPRESSION_THRESHOLD}).",
+    )
+    parser.add_argument(
+        "--fidelity",
+        type=float,
+        default=DEFAULT_FIDELITY_THRESHOLD,
+        metavar="RATIO",
+        help=f"Minimum signature fidelity to pass (default: {DEFAULT_FIDELITY_THRESHOLD}).",
+    )
+    parser.add_argument(
+        "--json",
+        metavar="FILE",
+        help="Write machine-readable results to this JSON file.",
+    )
+    args = parser.parse_args(argv)
+
+    pruner  = ShellPruner()
+    runner  = BenchmarkRunner(
+        pruner=pruner,
+        compression_threshold=args.threshold,
+        fidelity_threshold=args.fidelity,
+    )
+
+    suites_to_run = list(SUITES.items()) if args.suite == "all" else [
+        (args.suite, SUITES[args.suite])
+    ]
+
+    _banner("ACK — Agent Context Kernel  |  A/B Benchmark Report")
+    print(f"  Compression pass threshold : {args.threshold:.0%}")
+    print(f"  Fidelity pass threshold    : {args.fidelity:.0%}")
+    print(f"  Pruner                     : {pruner.metadata.name} v{pruner.metadata.version}")
+    print(f"  Suites                     : {', '.join(s for s, _ in suites_to_run)}")
+
+    all_results: list[SuiteResult] = []
+    all_passed  = True
+
+    for _suite_key, (suite_name, corpus) in suites_to_run:
+        result = runner.run_suite(suite_name, corpus)
+        runner.print_suite_report(result)
+        passed = runner.assert_suite(result, args.threshold, args.fidelity)
+        all_passed = all_passed and passed
+        all_results.append(result)
+
+    _banner("Global Summary")
+    total_naked  = sum(s.total_naked_tokens  for s in all_results)
+    total_pruned = sum(s.total_pruned_tokens for s in all_results)
+    global_compression = (total_naked - total_pruned) / max(1, total_naked)
+    global_mean_fidelity = statistics.mean(s.mean_fidelity for s in all_results)
+
+    print(f"  Total naked tokens    : {total_naked:>12,}")
+    print(f"  Total proxied tokens  : {total_pruned:>12,}")
+    print(
+        f"  Global compression    : {ANSI_BOLD}{global_compression:.1%}{ANSI_RESET}  "
+        f"(≈ {total_naked - total_pruned:,} tokens saved)"
+    )
+    print(f"  Global sig fidelity   : {global_mean_fidelity:.1%}")
+    print()
+
+    for s in all_results:
+        icon = f"{ANSI_GREEN}✓{ANSI_RESET}" if s.passed else f"{ANSI_RED}✗{ANSI_RESET}"
+        print(
+            f"  {icon}  {s.suite_name:<40}  "
+            f"compression={s.overall_compression:.0%}  "
+            f"fidelity={s.mean_fidelity:.0%}"
+        )
+
+    print()
+    if all_passed:
+        print(f"{ANSI_GREEN}{ANSI_BOLD}✓  ALL SUITES PASSED{ANSI_RESET}")
+    else:
+        print(f"{ANSI_RED}{ANSI_BOLD}✗  SOME SUITES FAILED — see FAIL lines above{ANSI_RESET}")
+
+    if args.json:
+        out_path = Path(args.json)
+        payload  = {
+            "passed":             all_passed,
+            "global_compression": global_compression,
+            "global_fidelity":    global_mean_fidelity,
+            "total_naked_tokens": total_naked,
+            "total_pruned_tokens":total_pruned,
+            "suites": [
+                {
+                    "name":              s.suite_name,
+                    "passed":            s.passed,
+                    "overall_compression": s.overall_compression,
+                    "mean_compression":  s.mean_compression,
+                    "p10_compression":   s.p10_compression,
+                    "p50_compression":   s.p50_compression,
+                    "p90_compression":   s.p90_compression,
+                    "mean_fidelity":     s.mean_fidelity,
+                    "min_fidelity":      s.min_fidelity,
+                    "items": [asdict(i) for i in s.items],
+                }
+                for s in all_results
+            ],
+        }
+        out_path.write_text(json.dumps(payload, indent=2))
+        print(f"\nResults written to: {out_path}")
+
+    return 0 if all_passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
