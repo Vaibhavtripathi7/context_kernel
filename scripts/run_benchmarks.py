@@ -242,3 +242,212 @@ class SuiteResult:
     total_pruned_tokens:int                = 0
     overall_compression:float              = 0.0
     passed:             bool               = False
+
+
+class BenchmarkRunner:
+    """
+    Orchestrates the A/B benchmark.
+
+    Usage::
+
+        runner = BenchmarkRunner(pruner=ShellPruner())
+        suite  = runner.run_suite("traceback", traceback_corpus())
+        runner.print_suite_report(suite)
+        passed = runner.assert_suite(suite)
+    """
+
+    def __init__(
+        self,
+        pruner: ShellPruner,
+        compression_threshold: float = DEFAULT_COMPRESSION_THRESHOLD,
+        fidelity_threshold:    float = DEFAULT_FIDELITY_THRESHOLD,
+    ) -> None:
+        self.pruner                 = pruner
+        self.compression_threshold  = compression_threshold
+        self.fidelity_threshold     = fidelity_threshold
+
+    def _benchmark_item(self, name: str, text: str) -> ItemResult:
+        """Run one corpus item through the A (naked) and B (proxied) paths."""
+        naked_chars  = len(text)
+        naked_tokens = max(1, naked_chars // 4)
+        naked_sigs   = extract_signatures(text)
+
+        t0 = time.perf_counter()
+        summary: str | None = None
+        if self.pruner.matches(text):
+            summary = self.pruner.compress(text)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        proxied_text   = summary if summary is not None else text
+        proxied_chars  = len(proxied_text)
+        proxied_tokens = max(1, proxied_chars // 4)
+        proxied_sigs   = extract_signatures(proxied_text)
+
+        compression = (naked_tokens - proxied_tokens) / naked_tokens
+        preserved   = len(naked_sigs & proxied_sigs)
+        fidelity    = preserved / len(naked_sigs) if naked_sigs else 1.0
+
+        return ItemResult(
+            name=name,
+            naked_chars=naked_chars,
+            proxied_chars=proxied_chars,
+            naked_tokens=naked_tokens,
+            proxied_tokens=proxied_tokens,
+            compression_ratio=compression,
+            naked_sigs=len(naked_sigs),
+            preserved_sigs=preserved,
+            fidelity_ratio=fidelity,
+            pruner_fired=(summary is not None),
+            duration_ms=elapsed_ms,
+        )
+
+    def run_suite(self, name: str, corpus: list[tuple[str, str]]) -> SuiteResult:
+        """Run every (item_name, text) pair in corpus and aggregate."""
+        suite = SuiteResult(suite_name=name)
+
+        for item_name, text in corpus:
+            result = self._benchmark_item(item_name, text)
+            suite.items.append(result)
+
+        if not suite.items:
+            return suite
+
+        ratios    = [r.compression_ratio for r in suite.items]
+        fidelities = [r.fidelity_ratio   for r in suite.items]
+
+        suite.mean_compression    = statistics.mean(ratios)
+        suite.std_compression     = statistics.stdev(ratios) if len(ratios) > 1 else 0.0
+        suite.p10_compression     = _percentile(ratios, 10)
+        suite.p50_compression     = _percentile(ratios, 50)
+        suite.p90_compression     = _percentile(ratios, 90)
+        suite.mean_fidelity       = statistics.mean(fidelities)
+        suite.min_fidelity        = min(fidelities)
+        suite.total_naked_tokens  = sum(r.naked_tokens  for r in suite.items)
+        suite.total_pruned_tokens = sum(r.proxied_tokens for r in suite.items)
+        suite.overall_compression = (
+            (suite.total_naked_tokens - suite.total_pruned_tokens)
+            / suite.total_naked_tokens
+        )
+
+        return suite
+
+    def assert_suite(
+        self,
+        suite: SuiteResult,
+        compression_threshold: float | None = None,
+        fidelity_threshold:    float | None = None,
+    ) -> bool:
+        """
+        Assert that the suite meets the pass thresholds.
+
+        Returns True if all assertions pass; False otherwise.
+        Prints coloured PASS/FAIL lines for each assertion.
+        """
+        ct = compression_threshold or self.compression_threshold
+        ft = fidelity_threshold    or self.fidelity_threshold
+
+        failures: list[str] = []
+
+        def _check(label: str, actual: float, threshold: float, direction: str = ">=") -> None:
+            ok = actual >= threshold if direction == ">=" else actual <= threshold
+
+            icon   = f"{ANSI_GREEN}✓ PASS{ANSI_RESET}" if ok else f"{ANSI_RED}✗ FAIL{ANSI_RESET}"
+            detail = f"{actual:.1%}  (threshold {direction} {threshold:.0%})"
+            print(f"  {icon}  {label:<55} {detail}")
+
+            if not ok:
+                failures.append(f"{label}: {actual:.1%} {direction} {threshold:.0%} FAILED")
+
+        print(f"\n{ANSI_BOLD}Assertions — {suite.suite_name}{ANSI_RESET}")
+
+        _check(
+            "Mean token compression",
+            suite.mean_compression,
+            ct,
+        )
+        _check(
+            "P10 (worst-case) compression",
+            suite.p10_compression,
+            max(0.30, ct - 0.30),
+        )
+        _check(
+            "Overall compression (aggregate tokens)",
+            suite.overall_compression,
+            ct,
+        )
+        _check(
+            "Mean signature fidelity",
+            suite.mean_fidelity,
+            ft,
+        )
+        _check(
+            "Min signature fidelity (worst item)",
+            suite.min_fidelity,
+            max(0.80, ft - 0.15),
+        )
+
+        passed = len(failures) == 0
+        suite.passed = passed
+
+        if passed:
+            print(f"\n  {ANSI_GREEN}{ANSI_BOLD}All assertions passed.{ANSI_RESET}")
+        else:
+            print(f"\n  {ANSI_RED}{ANSI_BOLD}{len(failures)} assertion(s) failed.{ANSI_RESET}")
+
+        return passed
+
+
+    def print_suite_report(self, suite: SuiteResult) -> None:
+        """Print a formatted per-item table and aggregate statistics."""
+        _hline()
+        print(f"{ANSI_BOLD}{ANSI_CYAN}Suite: {suite.suite_name}{ANSI_RESET}")
+        _hline()
+
+        hdr = (
+            f"{'Item':<32}  {'Raw tok':>8}  {'Prnd tok':>8}  "
+            f"{'Compress':>8}  {'Sigs':>5}  {'Fidelity':>8}  "
+            f"{'Fired':>6}  {'ms':>6}"
+        )
+        print(f"{ANSI_DIM}{hdr}{ANSI_RESET}")
+        print("-" * len(hdr))
+
+        for r in suite.items:
+            fired  = (
+                f"{ANSI_GREEN}yes{ANSI_RESET}"
+                if r.pruner_fired
+                else f"{ANSI_YELLOW}no{ANSI_RESET}"
+            )
+            fidstr = (
+                f"{ANSI_GREEN}{r.fidelity_ratio:.0%}{ANSI_RESET}"
+                if r.fidelity_ratio >= DEFAULT_FIDELITY_THRESHOLD
+                else f"{ANSI_RED}{r.fidelity_ratio:.0%}{ANSI_RESET}"
+            )
+            cmpstr = (
+                f"{ANSI_GREEN}{r.compression_ratio:.0%}{ANSI_RESET}"
+                if r.compression_ratio >= DEFAULT_COMPRESSION_THRESHOLD
+                else f"{ANSI_YELLOW}{r.compression_ratio:.0%}{ANSI_RESET}"
+            )
+            print(
+                f"{r.name:<32}  {r.naked_tokens:>8,}  {r.proxied_tokens:>8,}  "
+                f"{cmpstr:>17}  {r.naked_sigs:>5}  {fidstr:>17}  "
+                f"{fired:>15}  {r.duration_ms:>6.1f}"
+            )
+
+        print()
+        print(f"  Total naked tokens   : {suite.total_naked_tokens:>10,}")
+        print(f"  Total proxied tokens : {suite.total_pruned_tokens:>10,}")
+        print(
+            f"  Overall compression  : {ANSI_BOLD}"
+            f"{suite.overall_compression:.1%}{ANSI_RESET}  "
+            f"(saved ~{suite.total_naked_tokens - suite.total_pruned_tokens:,} tokens)"
+        )
+        print(
+            f"  Mean compression     : {suite.mean_compression:.1%}  "
+            f"± {suite.std_compression:.1%}  "
+            f"[p10={suite.p10_compression:.0%}  p50={suite.p50_compression:.0%}  "
+            f"p90={suite.p90_compression:.0%}]"
+        )
+        print(
+            f"  Mean sig fidelity    : {suite.mean_fidelity:.1%}  "
+            f"(worst={suite.min_fidelity:.0%})"
+        )
