@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Lint (ruff)
+        run: poetry run ruff check context_kernel scripts
+
+      - name: Type check (mypy)
+        run: poetry run mypy context_kernel
+
+      - name: Run tests
+        run: poetry run pytest -q
+
+      - name: Run compression benchmark
+        run: poetry run python scripts/run_benchmarks.py
