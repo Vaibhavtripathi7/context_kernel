@@ -1,9 +1,42 @@
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+*.egg
+
+# ── Virtual environments ────────────────────────────────────────────────────
 .venv/
-*.db
-*.db-wal
-*.db-shm
+venv/
+env/
+.python-version
+
+# ── Tooling caches ──────────────────────────────────────────────────────────
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── ACK runtime data ────────────────────────────────────────────────────────
+# The default kernel database lives in ~/.local/share/ack; ignore any local copies.
+*.db
+*.db-wal
+*.db-shm
+kernel.db
+
+# ── Node (if a demo web UI is added later) ──────────────────────────────────
+node_modules/
+
+# ── Claude Code local settings ──────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── Editors / OS ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store
