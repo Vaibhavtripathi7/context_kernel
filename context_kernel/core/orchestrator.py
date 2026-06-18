@@ -30,8 +30,6 @@ _CYAN  = "\033[36m"
 _BOLD  = "\033[1m"
 _RESET = "\033[0m"
 
-_SELECT_TIMEOUT = 0.08
-
 _ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
 
@@ -172,15 +170,15 @@ class Orchestrator:
         stdin_fd  = sys.stdin.fileno()
         stdout_fd = sys.stdout.fileno()
         exit_code = 0
+        watched   = [master_fd, stdin_fd]
 
         while True:
+            # Block until something happens when nothing is buffered; only poll
+            # (on the flush timeout) while we are still holding data to emit.
+            # This keeps the loop at ~0% CPU when the agent is idle.
+            timeout = self.config.buffer_flush_timeout if self._buffer else None
             try:
-                rlist, _, _ = select.select(
-                    [master_fd, stdin_fd],
-                    [],
-                    [],
-                    _SELECT_TIMEOUT,
-                )
+                rlist, _, _ = select.select(watched, [], [], timeout)
             except InterruptedError:
                 continue
             except (ValueError, OSError):
@@ -208,13 +206,16 @@ class Orchestrator:
                         os.write(master_fd, keys)
                     except OSError:
                         pass
+                else:
+                    # stdin hit EOF (e.g. piped input or /dev/null). Stop
+                    # watching it, otherwise select would report it readable
+                    # forever and spin the loop at 100% CPU.
+                    watched = [master_fd]
 
-            elapsed_since_data = time.monotonic() - self._last_data_monotonic
-            if (
-                self._buffer
-                and elapsed_since_data >= self.config.buffer_flush_timeout
-            ):
-                self._flush_buffer(stdout_fd, force=True)
+            if self._buffer:
+                elapsed_since_data = time.monotonic() - self._last_data_monotonic
+                if elapsed_since_data >= self.config.buffer_flush_timeout:
+                    self._flush_buffer(stdout_fd, force=True)
 
         if self._buffer:
             self._flush_buffer(stdout_fd, force=True)
