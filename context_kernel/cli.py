@@ -23,6 +23,42 @@ from .memory.pager import Pager
 from .memory.storage import StorageEngine
 from .pruners.shell_pruner import ShellPruner
 
+# Rough input-token price used only for the end-of-session estimate. It is an
+# order-of-magnitude figure (USD per million input tokens); override mentally
+# for your own model. Kept conservative so the saving is never overstated.
+_USD_PER_MILLION_INPUT_TOKENS = 3.0
+
+
+def _print_session_summary(
+    storage: StorageEngine,
+    session_id: str,
+    stats: OrchestratorStats,
+) -> None:
+    """Print a one-glance summary of what ACK saved this session (to stderr)."""
+    db_stats          = storage.stats(session_id)
+    chunks            = db_stats["total_entries"]
+    pruned            = db_stats["pruned_entries"]
+    raw_pruned_tokens = db_stats["tokens_saved"]  # raw token volume of pruned chunks
+    saved             = stats.tokens_saved
+
+    if chunks == 0:
+        return
+
+    elapsed = max(1, int(time.monotonic() - stats.session_start))
+    pct     = (saved / raw_pruned_tokens * 100) if raw_pruned_tokens else 0.0
+    cost    = saved / 1_000_000 * _USD_PER_MILLION_INPUT_TOKENS
+    rate    = f"{_USD_PER_MILLION_INPUT_TOKENS:g}"
+
+    lines = [
+        click.style("[ACK] Session summary", fg="cyan", bold=True),
+        f"  Chunks intercepted : {chunks:>8,}",
+        f"  Chunks pruned      : {pruned:>8,}",
+        f"  Tokens saved       : {saved:>8,}  (~{pct:.0f}% of pruned output)",
+        f"  Est. cost saved    : ${cost:>7.2f}  (at ${rate}/M input tokens)",
+        f"  Elapsed            : {elapsed:>7}s",
+    ]
+    click.echo("\n" + "\n".join(lines), err=True)
+
 
 class StatsPanel(Static):
     stats: reactive[OrchestratorStats] = reactive(OrchestratorStats())
@@ -209,10 +245,14 @@ def cmd_run(
     )
 
     if tui:
-        exit_code = AckDashboard(orchestrator=orch).run()
-        sys.exit(exit_code or 0)
+        exit_code = AckDashboard(orchestrator=orch).run() or 0
     else:
-        sys.exit(orch.run())
+        exit_code = orch.run()
+        if not no_annotate:
+            _print_session_summary(storage, session.session_id, orch.stats)
+
+    storage.close()
+    sys.exit(exit_code)
 
 
 @main.command(name="search")
