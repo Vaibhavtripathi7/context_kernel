@@ -158,7 +158,12 @@ class Orchestrator:
                 os.close(slave_fd)
             os.close(master_fd)
 
-            os.execvp(self.command[0], self.command)
+            try:
+                os.execvp(self.command[0], self.command)
+            except OSError as exc:
+                # Exec failed (e.g. command not found). Report cleanly and exit
+                # 127 instead of letting a Python traceback escape the child.
+                os.write(2, f"ack: cannot run {self.command[0]!r}: {exc.strerror}\n".encode())
             os._exit(127)
 
         os.close(slave_fd)
