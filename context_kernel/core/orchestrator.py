@@ -272,7 +272,7 @@ class Orchestrator:
         if summary is not None:
             self._persist(text, pruned=True, summary=summary)
             injection = self._format_injection(summary, line_count)
-            injected  = injection.encode("utf-8")
+            injected  = self._terminal_newlines(injection).encode("utf-8")
             self._stats.total_bytes_injected += len(injected)
             self._emit(stdout_fd, injected)
             _display = injection
@@ -286,6 +286,18 @@ class Orchestrator:
 
         if self.stats_callback is not None:
             self.stats_callback(self._stats)
+
+    def _terminal_newlines(self, text: str) -> str:
+        """Add explicit CRLF to text ACK generates itself.
+
+        In raw mode the terminal's NL→CRLF output mapping (OPOST) is off, so a
+        bare ``\\n`` only moves the cursor down, not back to column 0 (the
+        "staircase" effect). Child passthrough already carries CRLF from its own
+        PTY, so we only convert our injected summaries, and only while raw.
+        """
+        if self._saved_tty is None:
+            return text
+        return text.replace("\r\n", "\n").replace("\n", "\r\n")
 
     def _emit(self, fd: int, data: bytes) -> None:
         offset = 0
