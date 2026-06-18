@@ -5,7 +5,7 @@ description = "ACK: Agent Context Kernel — intelligent memory middleware for A
 authors = ["Vaibhav Tripathi <vaibhavtripathi2020@gmail.com>"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/vaibhavtripathi/context-kernel"
+repository = "https://github.com/Vaibhavtripathi7/context_kernel"
 keywords = ["llm", "ai-agents", "context-window", "pty", "developer-tools"]
 classifiers = [
     "Development Status :: 4 - Beta",
