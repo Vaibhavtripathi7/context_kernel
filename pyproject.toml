@@ -13,13 +13,16 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Build Tools",
 ]
 packages = [{ include = "context_kernel" }]
 
 [tool.poetry.dependencies]
-python = "^3.13"
+python = "^3.10"
 textual = "^0.65.0"
 click  = "^8.1"
 # tree-sitter 0.23 ships the new one-step Language(grammar.language()) API.
@@ -42,7 +45,7 @@ ack = "context_kernel.cli:main"
 
 # ── mypy ────────────────────────────────────────────────────────────────────
 [tool.mypy]
-python_version    = "3.13"
+python_version    = "3.10"
 strict            = true
 warn_return_any   = true
 warn_unused_configs = true
@@ -61,7 +64,7 @@ ignore_missing_imports = true
 # ── ruff ────────────────────────────────────────────────────────────────────
 [tool.ruff]
 line-length    = 100
-target-version = "py313"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "ANN", "S", "B", "C4", "SIM"]
