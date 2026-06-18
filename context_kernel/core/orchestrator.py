@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -31,6 +32,9 @@ _RESET = "\033[0m"
 
 _SELECT_TIMEOUT = 0.08
 
+_ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
+_TRACEBACK_MARKER = "Traceback (most recent call last):"
+
 
 @dataclass
 class OrchestratorConfig:
@@ -38,6 +42,9 @@ class OrchestratorConfig:
     buffer_flush_timeout:    float = 0.15
     read_chunk_bytes:        int   = 8192
     annotate_injections:     bool  = True
+    # Cap on holding an unfinished prunable block (e.g. a traceback that spans
+    # several PTY reads) before flushing anyway. Guards against unbounded growth.
+    max_buffer_bytes:        int   = 262144
 
 
 @dataclass
@@ -251,6 +258,17 @@ class Orchestrator:
             self._buffer.append(raw)
             return
 
+        # A traceback often spans several PTY reads. If this buffer holds a
+        # traceback that has not reached its exception line yet, keep buffering
+        # so it prunes as one unit instead of a broken half (up to the cap).
+        if (
+            not force
+            and len(raw) < self.config.max_buffer_bytes
+            and self._is_incomplete_traceback(text)
+        ):
+            self._buffer.append(raw)
+            return
+
         if below_threshold or self._text_is_prompt(text):
             self._emit(stdout_fd, raw)
             self._persist(text, pruned=False)
@@ -332,6 +350,24 @@ class Orchestrator:
             f"{summary_lines} lines  (full log stored in DB){_RESET}\n"
         )
         return banner + body
+
+    def _is_incomplete_traceback(self, text: str) -> bool:
+        """True if text holds a traceback still streaming its frames.
+
+        A finished traceback ends in a non-indented exception line (e.g.
+        ``KeyError: ...``); while frames are still arriving the last non-blank
+        line is an indented ``File "..."`` / code line, or the header itself.
+        """
+        if _TRACEBACK_MARKER not in text:
+            return False
+        clean = _ANSI_ESC.sub("", text)
+        nonblank = [ln for ln in clean.splitlines() if ln.strip()]
+        if not nonblank:
+            return False
+        last = nonblank[-1]
+        if _TRACEBACK_MARKER in last:
+            return True
+        return last[:1].isspace()
 
     def _tail_is_prompt(self, chunk: bytes) -> bool:
         tail = chunk[-200:]
