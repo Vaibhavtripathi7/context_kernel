@@ -285,14 +285,15 @@ class Orchestrator:
 
         summary: str | None = None
         for pruner in self.pruners:
-            if pruner.matches(text):
-                result = pruner.compress(text)
-                if result is not None:
-                    summary = result
-                    saved = max(0, (len(text) - len(summary)) // 4)
-                    self._stats.tokens_saved      += saved
-                    self._stats.total_pruner_hits += 1
-                    break
+            # compress() self-gates (returns None when it can't help), so we
+            # call it directly rather than running matches() a second time.
+            result = pruner.compress(text)
+            if result is not None:
+                summary = result
+                saved = max(0, (len(text) - len(summary)) // 4)
+                self._stats.tokens_saved      += saved
+                self._stats.total_pruner_hits += 1
+                break
 
         if summary is not None:
             self._persist(text, pruned=True, summary=summary)
