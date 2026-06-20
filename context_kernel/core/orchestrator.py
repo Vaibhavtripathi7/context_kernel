@@ -16,6 +16,7 @@ import signal
 import struct
 import sys
 import termios
+import threading
 import time
 import tty
 from collections.abc import Callable
@@ -119,7 +120,7 @@ class Orchestrator:
         self._child_pid = child_pid
 
         self._enter_raw_mode()
-        self._install_sigwinch_handler()
+        self._install_signal_handlers()
 
         try:
             return self._io_loop(child_pid)
@@ -399,13 +400,30 @@ class Orchestrator:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self._saved_tty)
             self._saved_tty = None
 
-    def _install_sigwinch_handler(self) -> None:
-        def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
-            if self._master_fd is not None and sys.stdout.isatty():
-                rows, cols = self._get_terminal_size()
-                self._set_winsize(self._master_fd, rows, cols)
+    def _install_signal_handlers(self) -> None:
+        # Signals can only be installed from the main thread. The experimental
+        # --tui mode runs the orchestrator on a worker thread, so skip there.
+        if threading.current_thread() is not threading.main_thread():
+            return
+        signal.signal(signal.SIGWINCH, self._on_sigwinch)
+        signal.signal(signal.SIGTERM, self._on_terminate)
+        signal.signal(signal.SIGHUP, self._on_terminate)
 
-        signal.signal(signal.SIGWINCH, _handler)
+    def _on_sigwinch(self, signum: int, frame: object) -> None:  # noqa: ARG002
+        if self._master_fd is not None and sys.stdout.isatty():
+            rows, cols = self._get_terminal_size()
+            self._set_winsize(self._master_fd, rows, cols)
+
+    def _on_terminate(self, signum: int, frame: object) -> None:  # noqa: ARG002
+        # Restore the terminal and forward the signal to the child before
+        # exiting, so a killed ACK never leaves the shell stuck in raw mode.
+        self._restore_terminal()
+        if self._child_pid is not None:
+            try:
+                os.killpg(self._child_pid, signum)
+            except OSError:
+                pass
+        os._exit(128 + signum)
 
     @staticmethod
     def _get_terminal_size() -> tuple[int, int]:
