@@ -1,4 +1,3 @@
-<div align="center">
 
 # ACK: Agent Context Kernel
 
@@ -13,10 +12,13 @@ Your agent sees the summary. The full log is one `ack search` away.
 ![Platform](https://img.shields.io/badge/platform-POSIX-lightgrey.svg)
 ![Tests](https://img.shields.io/badge/tests-97%20passing-brightgreen.svg)
 
-</div>
+---
+
+<div align="center">
 
 ![ACK compressing a log flood and a traceback in real time](./assets/context_kernel.gif)
 
+</div>
 
 ---
 
