@@ -52,9 +52,9 @@ def emit_buried_traceback(n_noise_frames: int = 40) -> None:
 if __name__ == "__main__":
     say("[agent] Building project and running the test suite...", 1.2)
     say("[agent] Compiling dependencies (verbose output follows)...", 1.0)
-    emit_log_flood()                 # -> repetition pruner: 200 lines to a table
+    emit_log_flood()
     time.sleep(1.4)
     say("[agent] Compile done. Running pytest...", 1.2)
-    emit_buried_traceback()          # -> traceback pruner: keeps exception + user frames
+    emit_buried_traceback()
     time.sleep(1.0)
     say("[agent] Test run failed (see compressed traceback above).", 0.6)

@@ -24,15 +24,8 @@ from .memory.pager import Pager
 from .memory.storage import StorageEngine
 from .pruners.shell_pruner import ShellPruner
 
-# Rough input-token price used only for the end-of-session estimate. It is an
-# order-of-magnitude figure (USD per million input tokens); override mentally
-# for your own model. Kept conservative so the saving is never overstated.
 _USD_PER_MILLION_INPUT_TOKENS = 3.0
 
-# Stored output keeps the agent's raw bytes, which include terminal escape
-# sequences (colours, but also cursor/mouse/app-mode toggles). Echoing those
-# verbatim can reprogram the user's terminal, so any stored text printed back
-# is stripped of escape sequences and other control chars first.
 _ANSI_OSC   = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI   = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ANSI_OTHER = re.compile(r"\x1b[@-Z\\-_]")
@@ -56,7 +49,7 @@ def _print_session_summary(
     db_stats          = storage.stats(session_id)
     chunks            = db_stats["total_entries"]
     pruned            = db_stats["pruned_entries"]
-    raw_pruned_tokens = db_stats["tokens_saved"]  # raw token volume of pruned chunks
+    raw_pruned_tokens = db_stats["tokens_saved"]
     saved             = stats.tokens_saved
 
     if chunks == 0:
@@ -78,8 +71,6 @@ def _print_session_summary(
     try:
         click.echo("\n" + "\n".join(lines), err=True)
     except (BrokenPipeError, OSError):
-        # Downstream (e.g. `... 2>&1 | head`) closed the pipe; never let the
-        # summary crash the run or mask the agent's real exit code.
         pass
 
 

@@ -28,7 +28,6 @@ from ..pruners.base import BasePruner
 
 _DIM   = "\033[2m"
 _CYAN  = "\033[36m"
-_BOLD  = "\033[1m"
 _RESET = "\033[0m"
 
 _ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
@@ -41,8 +40,6 @@ class OrchestratorConfig:
     buffer_flush_timeout:    float = 0.15
     read_chunk_bytes:        int   = 8192
     annotate_injections:     bool  = True
-    # Cap on holding an unfinished prunable block (e.g. a traceback that spans
-    # several PTY reads) before flushing anyway. Guards against unbounded growth.
     max_buffer_bytes:        int   = 262144
 
 
@@ -92,7 +89,7 @@ class Orchestrator:
         self.command        = command
         self.session_id     = session_id
         self.storage        = storage
-        self.pruners:list[BasePruner] = pruners or []
+        self.pruners: list[BasePruner] = pruners or []
         self.config         = config or OrchestratorConfig()
         self.stats_callback = stats_callback
         self.text_callback: Callable[[str], None] | None = None
@@ -107,9 +104,6 @@ class Orchestrator:
     @property
     def stats(self) -> OrchestratorStats:
         return self._stats
-
-    def add_pruner(self, pruner: BasePruner) -> None:
-        self.pruners.append(pruner)
 
     def run(self) -> int:
         """Spawn the agent, block until it exits, and return its exit code.
@@ -162,8 +156,6 @@ class Orchestrator:
             try:
                 os.execvp(self.command[0], self.command)
             except OSError as exc:
-                # Exec failed (e.g. command not found). Report cleanly and exit
-                # 127 instead of letting a Python traceback escape the child.
                 os.write(2, f"ack: cannot run {self.command[0]!r}: {exc.strerror}\n".encode())
             os._exit(127)
 
@@ -171,6 +163,13 @@ class Orchestrator:
         return master_fd, child_pid
 
     def _io_loop(self, child_pid: int) -> int:
+        """Pump I/O between the user and the child until the child exits.
+
+        While nothing is buffered the loop blocks in select(); it only polls on
+        the flush timeout while it is still holding data to emit, so it stays at
+        ~0% CPU when idle. stdin is dropped from the watch set once it reaches
+        EOF so a closed/piped input never spins the loop.
+        """
         assert self._master_fd is not None
         master_fd = self._master_fd
         stdin_fd  = sys.stdin.fileno()
@@ -179,9 +178,6 @@ class Orchestrator:
         watched   = [master_fd, stdin_fd]
 
         while True:
-            # Block until something happens when nothing is buffered; only poll
-            # (on the flush timeout) while we are still holding data to emit.
-            # This keeps the loop at ~0% CPU when the agent is idle.
             timeout = self.config.buffer_flush_timeout if self._buffer else None
             try:
                 rlist, _, _ = select.select(watched, [], [], timeout)
@@ -213,9 +209,6 @@ class Orchestrator:
                     except OSError:
                         pass
                 else:
-                    # stdin hit EOF (e.g. piped input or /dev/null). Stop
-                    # watching it, otherwise select would report it readable
-                    # forever and spin the loop at 100% CPU.
                     watched = [master_fd]
 
             if self._buffer:
@@ -243,9 +236,10 @@ class Orchestrator:
     def _flush_buffer(self, stdout_fd: int, *, force: bool = False) -> None:
         """Emit the buffered output, pruning it first if it qualifies.
 
-        force controls only *whether to emit now* (silence timeout / EOF),
-        never *whether to prune*: output below pruning_threshold_lines and
-        interactive prompts always pass through verbatim.
+        force controls only whether to emit now (silence timeout / EOF), never
+        whether to prune: output below pruning_threshold_lines and interactive
+        prompts always pass through verbatim. An unfinished traceback is held
+        (up to max_buffer_bytes) so it prunes as one unit across PTY reads.
         """
         if not self._buffer:
             return
@@ -265,9 +259,6 @@ class Orchestrator:
             self._buffer.append(raw)
             return
 
-        # A traceback often spans several PTY reads. If this buffer holds a
-        # traceback that has not reached its exception line yet, keep buffering
-        # so it prunes as one unit instead of a broken half (up to the cap).
         if (
             not force
             and len(raw) < self.config.max_buffer_bytes
@@ -285,8 +276,6 @@ class Orchestrator:
 
         summary: str | None = None
         for pruner in self.pruners:
-            # compress() self-gates (returns None when it can't help), so we
-            # call it directly rather than running matches() a second time.
             result = pruner.compress(text)
             if result is not None:
                 summary = result
@@ -314,12 +303,11 @@ class Orchestrator:
             self.stats_callback(self._stats)
 
     def _terminal_newlines(self, text: str) -> str:
-        """Add explicit CRLF to text ACK generates itself.
+        """Convert text ACK generates itself to CRLF while the terminal is raw.
 
-        In raw mode the terminal's NL→CRLF output mapping (OPOST) is off, so a
-        bare ``\\n`` only moves the cursor down, not back to column 0 (the
-        "staircase" effect). Child passthrough already carries CRLF from its own
-        PTY, so we only convert our injected summaries, and only while raw.
+        Raw mode disables the terminal's NL->CRLF output mapping, so a bare
+        ``\\n`` would leave the cursor in the same column (the "staircase"
+        effect). Child passthrough already carries CRLF from its own PTY.
         """
         if self._saved_tty is None:
             return text
@@ -362,9 +350,9 @@ class Orchestrator:
     def _is_incomplete_traceback(self, text: str) -> bool:
         """True if text holds a traceback still streaming its frames.
 
-        A finished traceback ends in a non-indented exception line (e.g.
-        ``KeyError: ...``); while frames are still arriving the last non-blank
-        line is an indented ``File "..."`` / code line, or the header itself.
+        A finished traceback ends in a non-indented exception line; while frames
+        are still arriving the last non-blank line is an indented frame line, or
+        the header itself.
         """
         if _TRACEBACK_MARKER not in text:
             return False
@@ -402,8 +390,6 @@ class Orchestrator:
             self._saved_tty = None
 
     def _install_signal_handlers(self) -> None:
-        # Signals can only be installed from the main thread. The experimental
-        # --tui mode runs the orchestrator on a worker thread, so skip there.
         if threading.current_thread() is not threading.main_thread():
             return
         signal.signal(signal.SIGWINCH, self._on_sigwinch)
@@ -416,8 +402,7 @@ class Orchestrator:
             self._set_winsize(self._master_fd, rows, cols)
 
     def _on_terminate(self, signum: int, frame: object) -> None:  # noqa: ARG002
-        # Restore the terminal and forward the signal to the child before
-        # exiting, so a killed ACK never leaves the shell stuck in raw mode.
+        """Restore the terminal and forward the signal to the child before exit."""
         self._restore_terminal()
         if self._child_pid is not None:
             try:

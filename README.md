@@ -1,203 +1,236 @@
-# ACK — Agent Context Kernel
+<div align="center">
 
-**Intelligent memory middleware for AI coding agents.** ACK is a transparent
-proxy that sits between you and any terminal-based AI agent (Aider, Claude
-Code, etc.). It intercepts the agent's output in real time, **prunes the
-noisy, repetitive, high-token blobs** (stack traces, build-error walls, log
-floods) down to their actionable signal, and **archives the full, untouched
-output** to a local, full-text-searchable database.
+# ACK: Agent Context Kernel
 
-The agent — and your context window — only sees the summary. The full log is
-always one `ack search` away.
+**Intelligent memory middleware for terminal AI coding agents.**
+
+ACK is a transparent proxy between you and any terminal AI agent (Aider, Claude Code, and others). It collapses the noisy, high-token output that pollutes the context window (stack traces, build-error walls, log floods) into its actionable signal, and archives the full untouched stream to a local searchable database.
+
+Your agent sees the summary. The full log is one `ack search` away.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-POSIX-lightgrey.svg)
+![Tests](https://img.shields.io/badge/tests-97%20passing-brightgreen.svg)
+
+</div>
+
+![ACK compressing a log flood and a traceback in real time](./assets/context_kernel.gif)
+
 
 ---
 
-## The problem
+## Results
 
-Long AI coding sessions rot. A single failed test can dump a 60-frame
-traceback; a broken build can repeat the same `error[E0308]` once per crate; a
-runaway logger can flood 400 identical lines. Every one of those tokens:
+Measured on a realistic corpus of tracebacks, Rust/GCC builds, and log floods. No LLM in the loop, reproducible, and run in CI on every push.
 
-- **pollutes the context window** the model reasons over, and
-- **invalidates the prompt cache**, so the next turn is slower and costlier.
+| Suite | Token compression | Signature fidelity |
+| --- | :---: | :---: |
+| Python tracebacks | **93%** | **100%** |
+| Rust + GCC builds | **91%** | **100%** |
+| Log floods | **99%** | **100%** |
+| Mixed realistic | **80%** | **100%** |
+| **Global** | **~95%** | **100%** |
 
-The signal in that wall of text is tiny — one exception type, a couple of user
-frames, a unique error code. ACK keeps the signal and drops the noise, with no
-new LLM in the loop.
-
-## How it works
-
-ACK spawns your agent inside a real **pseudo-terminal (PTY)**, so interactive
-prompts, colors, and cursor movement behave exactly as if you'd run the agent
-directly. It multiplexes I/O in a single `select()` loop:
-
-```
-                 ┌─────────────────────────── ACK ───────────────────────────┐
-   you  ──stdin──┤                                                            │
-                 │   keystrokes ─────────────────────────────────► master_fd │──► agent
-                 │                                                  (PTY)      │     (in PTY)
-   you  ◄─stdout─┤   agent output ─► buffer ─► pruners ─► stdout              │◄── agent
-                 │                      │                                     │
-                 │                      └─► full raw text ─► SQLite + FTS5    │
-                 └────────────────────────────────────────────────────────────┘
-```
-
-- Output below a configurable line threshold passes through **verbatim**.
-- Interactive prompts (`[Y/n]`, `Continue?`, `Enter key:`) are **never** pruned —
-  the agent is waiting and you need to see the question.
-- Larger blobs are routed through ordered **Pruners** (first match wins). A
-  match injects a compact summary into the live stream; a miss passes through.
-- Every chunk — pruned or not — is persisted to SQLite so nothing is lost.
-
-## Install
-
-ACK is POSIX-only (it uses `pty`, `fork`, and `termios`) and requires
-**Python 3.13+**.
-
-```bash
-# with Poetry (recommended for development)
-git clone https://github.com/vaibhavtripathi/context-kernel
-cd context-kernel
-poetry install
-poetry run ack --help
-
-# or with pip
-pip install .
-ack --help
-```
-
-`tree-sitter` is an optional dependency used by `ack toc` for accurate parsing;
-if it isn't available, ACK falls back to a regex parser automatically.
-
-## Quick start
-
-```bash
-# Wrap any agent — ACK is transparent
-ack run -- aider --model gpt-4o
-ack run -- claude --dangerously-skip-permissions
-
-# Tune when pruning kicks in (output lines before pruners activate)
-ack run --prune-threshold 50 -- aider
-
-# Search the full archived output of every session (FTS5 syntax)
-ack search "ImportError"
-ack search "ModuleNotFoundError OR FileNotFoundError"
-ack search "context window" --session abc123
-
-# Print a symbol table-of-contents for a file instead of dumping the whole thing
-ack toc context_kernel/core/orchestrator.py
-
-# List recent sessions
-ack sessions
-```
-
-### Try it in 10 seconds (no agent required)
-
-```bash
-# A bundled script that emits a 200-line log flood + a real traceback.
-# Watch ACK collapse it live, then search the full archived output.
-ack run -- python examples/crashing_agent.py
-ack search "KeyError"
-```
-
-## What gets compressed
-
-The built-in `ShellPruner` handles the three biggest context-window offenders:
-
-| Input | Strategy | Result |
-| --- | --- | --- |
-| **Python tracebacks** | Keep the exception line + 3 deepest *user* frames; drop stdlib/venv noise. Chained exceptions each summarized. | `── Traceback ──` with the frames that matter |
-| **Rust / GCC / Clang errors** | Deduplicate by error code / diagnostic line; surface counts + unique list. | `[Rust build: 32 errors → 8 unique]` |
-| **Repetitive log floods** | Detect when one line dominates (≥60%); replace with a frequency table. | `× 400  WARNING:root:retrying...` |
-
-The original bytes are never modified on disk — only the *live stream* the
-agent sees is compressed.
-
-## Benchmark results
-
-ACK ships a reproducible A/B benchmark (no LLM calls, free to run) that
-measures token reduction and **signature fidelity** — whether every actionable
-error signature (exception class, error code, file:line) survives compression.
+**62,772 of 66,158 corpus tokens removed with zero loss of error signatures.** Every exception class, error code, and `file:line` survives compression.
 
 ```bash
 poetry run python scripts/run_benchmarks.py
 ```
 
-Representative output across the bundled corpus (tracebacks, Rust/GCC builds,
-log floods, mixed realistic output):
+---
 
-| Suite | Compression | Signature fidelity |
+## Why it matters
+
+A single failed test can dump a 60-frame traceback. A broken build repeats the same `error[E0308]` once per crate. A runaway logger floods 400 identical lines. Those tokens do two costly things:
+
+1. **They drown the signal** the model reasons over. The real information (one exception, two user frames, a unique error code) is tiny.
+2. **They invalidate the prompt cache.** Inject a 2,000-token wall and the cached prefix shifts, so the next turn is recomputed from scratch: slower and more expensive.
+
+ACK keeps the signal, drops the noise, and never loses the original. The pruning is regex/structural, deterministic, and free. There is no second LLM.
+
+---
+
+## How it works
+
+ACK spawns your agent inside a real pseudo-terminal (`openpty` + `fork` + `setsid`), so prompts, colors, and cursor movement behave exactly as if you launched it directly. A single `select()` loop multiplexes your keyboard, the agent, the screen, and the database.
+
+![Arch diagram](./assets/context-kernel.drawio.png)
+
+
+---
+
+Every flushed buffer is handled in order:
+
+1. **Small output passes through verbatim** (below `--prune-threshold`, default 30 lines).
+2. **Interactive prompts are never pruned.** A `[Y/n]`, `(yes/no)`, or `Continue?` tail means the agent is waiting, so you always see it.
+3. **Large blobs run through ordered pruners.** First match wins: a hit injects a compact summary, a miss passes through.
+4. **Everything is persisted.** The summary is a view, never a deletion.
+
+When a pruner fires you see exactly what happened:
+
+```
+[ACK] Compressed 63 lines → 4 lines  (full log stored in DB)
+── Traceback ──
+  at /app/src/views/checkout.py:201 in post
+  at /app/src/models/cart.py:88 in checkout
+  ↳ KeyError: 'card_token'
+```
+
+---
+
+## Install
+
+POSIX only (uses `pty`, `fork`, `termios`), Python 3.10+. macOS and Linux native; on Windows use WSL.
+
+```bash
+git clone https://github.com/Vaibhavtripathi7/context_kernel
+cd context_kernel
+poetry install        # or: pip install .
+poetry run ack --help
+```
+
+`tree-sitter` powers `ack toc`; without it, ACK falls back to a regex parser automatically.
+
+---
+
+## Quick start
+
+```bash
+# Wrap any agent. Everything after `--` is the agent command.
+ack run -- aider --model gpt-4o
+ack run -- claude --dangerously-skip-permissions
+
+# Search the full archive of every session (FTS5 syntax, BM25 ranked)
+ack search "ImportError OR ModuleNotFoundError"
+
+# Symbol map of a file instead of dumping the whole thing
+ack toc context_kernel/core/orchestrator.py
+
+# Recent sessions
+ack sessions
+```
+
+**Try it in 10 seconds, no agent required.** A bundled script emits a 200-line flood plus a deep traceback:
+
+```bash
+ack run -- python examples/crashing_agent.py
+ack search "KeyError"
+```
+
+The flood collapses to a one-line frequency table, the traceback to its two user frames plus the exception, and the original is still searchable. When the agent exits, ACK prints exactly what it saved:
+
+```
+[ACK] Session summary
+  Chunks intercepted :        8
+  Chunks pruned      :        4
+  Tokens saved       :    3,438  (~97% of pruned output)
+  Est. cost saved    : $   0.01  (at $3/M input tokens)
+  Elapsed            :       6s
+```
+
+---
+
+## What gets compressed
+
+The built-in `ShellPruner` targets the three biggest offenders. The original bytes on disk are never modified.
+
+| Input | Strategy | Result |
 | --- | --- | --- |
-| Python Traceback | 93% | 100% |
-| Rust + GCC Builds | 91% | 100% |
-| Log Flood | 99% | 100% |
-| Mixed Realistic | 80% | 100% |
-| **Global** | **~95%** | **100%** |
+| **Python tracebacks** | Keep the exception + 3 deepest user frames; drop stdlib/venv noise. Chained exceptions each summarized. | `── Traceback ──` with only the frames that matter. |
+| **Rust / GCC / Clang errors** | Deduplicate by error code or diagnostic line; surface counts and the unique set. | `[Rust build: 32 errors → 8 unique]` |
+| **Log floods** | Detect when one line dominates (≥ 60%) and replace it with a frequency table. | `× 400  WARNING:root:retrying…` |
 
-≈ 62,000 of 66,000 corpus tokens removed with zero loss of error signatures.
+---
+
+## Use cases
+
+- **Long refactors that hit failing tests.** The agent sees the exception and the 3 user frames it needs, not the 60-frame async wall.
+- **Large Rust / C++ builds.** One type error re-emitted per crate becomes "8 unique errors," not 200 lines.
+- **Noisy services.** Repetitive retry/heartbeat spam collapses to a frequency table so the rare line stays visible.
+- **A searchable audit log.** `ack search` finds output across all sessions, weeks later, even after it scrolled off screen.
+
+---
+
+## Command reference
+
+**`ack run -- <agent command>`**
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--db PATH` | `~/.local/share/ack/kernel.db` | SQLite database path. |
+| `--prune-threshold N` | `30` | Output lines buffered before pruners activate. |
+| `--no-annotate` | off | Suppress the `[ACK]` banners. |
+| `--tui` | off | Experimental Textual stats dashboard. |
+
+**`ack search "<query>"`** takes an FTS5 expression (`AND`/`OR`/`NOT`, prefix, phrase) and ranks results by BM25. Options: `--session`, `--limit` (default 20), `--db`.
+
+**`ack toc <file>`** prints a symbol table-of-contents (Python today).
+
+**`ack sessions`** lists recent sessions. Options: `--limit`, `--db`.
+
+---
 
 ## Architecture
 
+No second LLM, no pipes (PTY only), no heavy database.
+
 | Module | Responsibility |
 | --- | --- |
-| `core/orchestrator.py` | PTY spawn (`openpty` + `fork` + `setsid`), `select()` I/O loop, buffer management, stream injection, terminal raw/cooked mode, SIGWINCH forwarding. |
-| `memory/storage.py` | SQLite in WAL mode + FTS5 content-table (trigger-synced, zero row duplication), BM25 search, per-session stats. |
-| `memory/pager.py` | tree-sitter (with regex fallback) symbol mapper — gives an agent a file's table-of-contents so it can page in just one function. |
-| `pruners/base.py` | `BasePruner` ABC: `matches()` fast gate + `compress()`. |
-| `pruners/shell_pruner.py` | The built-in traceback / build-error / log-flood pruner. |
-| `cli.py` | `click` CLI (`run`, `search`, `toc`, `sessions`) + experimental Textual stats dashboard. |
+| `core/orchestrator.py` | PTY spawn, `select()` loop, buffering, stream injection, raw/cooked mode, `SIGWINCH` forwarding. |
+| `memory/storage.py` | SQLite (WAL) + FTS5 content table kept in sync by triggers (text stored once), BM25 search, per-session stats. |
+| `memory/pager.py` | tree-sitter symbol mapper with regex fallback. |
+| `pruners/base.py` | `BasePruner` ABC: cheap `matches()` gate + `compress()`. |
+| `pruners/shell_pruner.py` | Built-in traceback / build-error / log-flood pruner. |
+| `cli.py` | `click` CLI plus the experimental Textual dashboard. |
 
-The full session archive lives at `~/.local/share/ack/kernel.db` by default
-(override with `--db`).
+WAL mode lets the orchestrator write while readers query without blocking. The archive lives at `~/.local/share/ack/kernel.db` (override with `--db`).
+
+---
 
 ## Writing your own pruner
 
 ```python
-from typing import Optional
 from context_kernel.pruners.base import BasePruner, PrunerMetadata
 
+
 class MyPruner(BasePruner):
-    metadata = PrunerMetadata(name="my_pruner", description="...")
+    metadata = PrunerMetadata(name="my_pruner", description="Collapses my tool's output")
 
     def matches(self, text: str) -> bool:
-        # Cheap gate — called on every flush.
-        return "my-pattern" in text
+        return "my-pattern" in text          # cheap gate, runs on every flush
 
-    def compress(self, text: str) -> Optional[str]:
-        # Return a summary string, or None to pass through verbatim.
-        return summarize(text)
+    def compress(self, text: str) -> str | None:
+        return summarize(text)               # return a summary, or None to pass through
 ```
 
-Register it on the `Orchestrator` (`pruners=[MyPruner(), ShellPruner()]`) or at
-runtime via `Orchestrator.add_pruner()`. Pruners run in order; the first to
-return a non-`None` summary wins.
+Register with `pruners=[MyPruner(), ShellPruner()]` on the `Orchestrator`. Pruners run in order; first non-`None` wins, so list specific pruners before general ones.
+
+---
 
 ## Development
 
 ```bash
 poetry install
-poetry run pytest                 # full suite (unit + integration)
+poetry run pytest                        # 97 tests (unit + integration)
 poetry run pytest -m "not integration"   # fast unit tests only
 poetry run python scripts/run_benchmarks.py
-poetry run ruff check context_kernel
-poetry run mypy context_kernel
+poetry run ruff check context_kernel scripts
+poetry run mypy context_kernel           # strict
 ```
 
-## Limitations & roadmap
+CI runs ruff, mypy `--strict`, the full suite, and the benchmark on every push and PR.
 
-- **POSIX only** — relies on `pty`/`fork`/`termios`. No Windows support (WSL works).
-- **`ack toc` is Python-only** today; the tree-sitter integration is structured
-  to add more languages.
-- **`--tui` dashboard is experimental**: Textual and the PTY interceptor both
-  want to own the terminal, so in `--tui` mode the agent runs non-interactively
-  and output is captured but not mirrored live. Headless mode (`ack run`) is the
-  recommended path. A future split-pane (tmux/Pilot) approach can lift this.
-- **Heuristic pruning**: pruners use regex/structural heuristics, not an LLM, by
-  design — they're fast, deterministic, and free.
+---
+
+## Limitations
+
+- **POSIX only** (uses `pty`/`fork`/`termios`); use WSL on Windows.
+- **`ack toc` is Python-only** today; tree-sitter is structured to add languages.
+- **`--tui` is experimental:** Textual and the PTY interceptor both want the terminal, so the agent runs non-interactively in that mode. Plain `ack run` is the recommended interactive path.
+- **Heuristic by design.** Pruners are fast, deterministic, and free; a new output format needs a new pruner (easy to write, see above).
+
+---
 
 ## License
 

@@ -15,8 +15,6 @@ class TestSanitize:
         assert _sanitize("\x1b[38;2;255;0;0mx\x1b[0m") == "x"
 
     def test_strips_mouse_and_app_mode_toggles(self) -> None:
-        # These are the sequences that caused the "endless numbers / Ctrl-C
-        # doesn't work" terminal lockup when echoed verbatim.
         evil = "\x1b[?1000h\x1b[?1006hclick\x1b[?2004h"
         assert _sanitize(evil) == "click"
 
