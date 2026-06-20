@@ -93,24 +93,6 @@ class Pager:
         self._cache[cache_key] = fmap
         return fmap
 
-    def page_symbol(self, path: Path, symbol_name: str) -> str | None:
-        """Return the source text of one named symbol, or None if not found."""
-        fmap  = self.map_file(path)
-        entry = next((s for s in fmap.symbols if s.name == symbol_name), None)
-        if entry is None:
-            return None
-
-        source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return "\n".join(source_lines[entry.start_line - 1 : entry.end_line])
-
-    def toc(self, path: Path) -> str:
-        return self.map_file(path).to_toc()
-
-    def invalidate(self, path: Path) -> None:
-        stale = [k for k in self._cache if k.startswith(str(path.resolve()))]
-        for k in stale:
-            del self._cache[k]
-
     def _parse_with_tree_sitter(
         self,
         path: Path,

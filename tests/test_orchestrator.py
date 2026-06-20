@@ -309,6 +309,68 @@ class TestBufferFlush:
         assert orch.stats.tokens_saved == (len(original_text) - len(summary_text)) // 4
 
 
+class TestIncompleteTracebackBuffering:
+    """
+    A traceback can span several PTY reads. ACK must hold an unfinished one
+    (still streaming frames, no exception line yet) so it prunes as a single
+    unit instead of a broken half.
+    """
+
+    @staticmethod
+    def _frames(n: int) -> bytes:
+        return b"".join(
+            b'  File "/app/module_%d.py", line %d, in fn\n    do_something()\n' % (i, i)
+            for i in range(n)
+        )
+
+    def test_incomplete_traceback_is_held(
+        self, storage: StorageEngine, pipe_pair: tuple[int, int]
+    ) -> None:
+        r_fd, w_fd = pipe_pair
+        orch = _make_orchestrator(storage, threshold=3)
+        orch._buffer = [b"Traceback (most recent call last):\n" + self._frames(10)]
+
+        orch._flush_buffer(w_fd, force=False)  # type: ignore[attr-defined]
+
+        data = _read_pipe(r_fd, timeout=0.1)
+        assert data == b"", "An unfinished traceback must not be emitted yet."
+        assert orch._buffer, "The partial traceback must remain buffered."
+
+    def test_complete_traceback_is_flushed(
+        self, storage: StorageEngine, pipe_pair: tuple[int, int]
+    ) -> None:
+        r_fd, w_fd = pipe_pair
+        from context_kernel.pruners.shell_pruner import ShellPruner
+
+        orch = _make_orchestrator(storage, pruners=[ShellPruner()], threshold=3)
+        full = (
+            b"Traceback (most recent call last):\n"
+            + self._frames(10)
+            + b"ValueError: boom\n"
+        )
+        orch._buffer = [full]
+
+        orch._flush_buffer(w_fd, force=False)  # type: ignore[attr-defined]
+
+        data = _read_pipe(r_fd)
+        assert b"ValueError" in data, "A finished traceback must be emitted."
+        assert not orch._buffer
+
+    def test_incomplete_traceback_flushed_when_forced(
+        self, storage: StorageEngine, pipe_pair: tuple[int, int]
+    ) -> None:
+        """The silence timeout / EOF (force=True) must flush even a partial."""
+        r_fd, w_fd = pipe_pair
+        orch = _make_orchestrator(storage, threshold=3)
+        orch._buffer = [b"Traceback (most recent call last):\n" + self._frames(10)]
+
+        orch._flush_buffer(w_fd, force=True)  # type: ignore[attr-defined]
+
+        data = _read_pipe(r_fd)
+        assert b"Traceback" in data
+        assert not orch._buffer
+
+
 class TestStatsTracking:
     """Verify the OrchestratorStats counters accumulate correctly."""
 

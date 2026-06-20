@@ -10,11 +10,13 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
 import sys
 import termios
+import threading
 import time
 import tty
 from collections.abc import Callable
@@ -26,10 +28,10 @@ from ..pruners.base import BasePruner
 
 _DIM   = "\033[2m"
 _CYAN  = "\033[36m"
-_BOLD  = "\033[1m"
 _RESET = "\033[0m"
 
-_SELECT_TIMEOUT = 0.08
+_ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
+_TRACEBACK_MARKER = "Traceback (most recent call last):"
 
 
 @dataclass
@@ -38,6 +40,7 @@ class OrchestratorConfig:
     buffer_flush_timeout:    float = 0.15
     read_chunk_bytes:        int   = 8192
     annotate_injections:     bool  = True
+    max_buffer_bytes:        int   = 262144
 
 
 @dataclass
@@ -86,7 +89,7 @@ class Orchestrator:
         self.command        = command
         self.session_id     = session_id
         self.storage        = storage
-        self.pruners:list[BasePruner] = pruners or []
+        self.pruners: list[BasePruner] = pruners or []
         self.config         = config or OrchestratorConfig()
         self.stats_callback = stats_callback
         self.text_callback: Callable[[str], None] | None = None
@@ -102,9 +105,6 @@ class Orchestrator:
     def stats(self) -> OrchestratorStats:
         return self._stats
 
-    def add_pruner(self, pruner: BasePruner) -> None:
-        self.pruners.append(pruner)
-
     def run(self) -> int:
         """Spawn the agent, block until it exits, and return its exit code.
 
@@ -114,7 +114,7 @@ class Orchestrator:
         self._child_pid = child_pid
 
         self._enter_raw_mode()
-        self._install_sigwinch_handler()
+        self._install_signal_handlers()
 
         try:
             return self._io_loop(child_pid)
@@ -153,27 +153,34 @@ class Orchestrator:
                 os.close(slave_fd)
             os.close(master_fd)
 
-            os.execvp(self.command[0], self.command)
+            try:
+                os.execvp(self.command[0], self.command)
+            except OSError as exc:
+                os.write(2, f"ack: cannot run {self.command[0]!r}: {exc.strerror}\n".encode())
             os._exit(127)
 
         os.close(slave_fd)
         return master_fd, child_pid
 
     def _io_loop(self, child_pid: int) -> int:
+        """Pump I/O between the user and the child until the child exits.
+
+        While nothing is buffered the loop blocks in select(); it only polls on
+        the flush timeout while it is still holding data to emit, so it stays at
+        ~0% CPU when idle. stdin is dropped from the watch set once it reaches
+        EOF so a closed/piped input never spins the loop.
+        """
         assert self._master_fd is not None
         master_fd = self._master_fd
         stdin_fd  = sys.stdin.fileno()
         stdout_fd = sys.stdout.fileno()
         exit_code = 0
+        watched   = [master_fd, stdin_fd]
 
         while True:
+            timeout = self.config.buffer_flush_timeout if self._buffer else None
             try:
-                rlist, _, _ = select.select(
-                    [master_fd, stdin_fd],
-                    [],
-                    [],
-                    _SELECT_TIMEOUT,
-                )
+                rlist, _, _ = select.select(watched, [], [], timeout)
             except InterruptedError:
                 continue
             except (ValueError, OSError):
@@ -201,13 +208,13 @@ class Orchestrator:
                         os.write(master_fd, keys)
                     except OSError:
                         pass
+                else:
+                    watched = [master_fd]
 
-            elapsed_since_data = time.monotonic() - self._last_data_monotonic
-            if (
-                self._buffer
-                and elapsed_since_data >= self.config.buffer_flush_timeout
-            ):
-                self._flush_buffer(stdout_fd, force=True)
+            if self._buffer:
+                elapsed_since_data = time.monotonic() - self._last_data_monotonic
+                if elapsed_since_data >= self.config.buffer_flush_timeout:
+                    self._flush_buffer(stdout_fd, force=True)
 
         if self._buffer:
             self._flush_buffer(stdout_fd, force=True)
@@ -229,9 +236,10 @@ class Orchestrator:
     def _flush_buffer(self, stdout_fd: int, *, force: bool = False) -> None:
         """Emit the buffered output, pruning it first if it qualifies.
 
-        force controls only *whether to emit now* (silence timeout / EOF),
-        never *whether to prune*: output below pruning_threshold_lines and
-        interactive prompts always pass through verbatim.
+        force controls only whether to emit now (silence timeout / EOF), never
+        whether to prune: output below pruning_threshold_lines and interactive
+        prompts always pass through verbatim. An unfinished traceback is held
+        (up to max_buffer_bytes) so it prunes as one unit across PTY reads.
         """
         if not self._buffer:
             return
@@ -251,6 +259,14 @@ class Orchestrator:
             self._buffer.append(raw)
             return
 
+        if (
+            not force
+            and len(raw) < self.config.max_buffer_bytes
+            and self._is_incomplete_traceback(text)
+        ):
+            self._buffer.append(raw)
+            return
+
         if below_threshold or self._text_is_prompt(text):
             self._emit(stdout_fd, raw)
             self._persist(text, pruned=False)
@@ -260,19 +276,18 @@ class Orchestrator:
 
         summary: str | None = None
         for pruner in self.pruners:
-            if pruner.matches(text):
-                result = pruner.compress(text)
-                if result is not None:
-                    summary = result
-                    saved = max(0, (len(text) - len(summary)) // 4)
-                    self._stats.tokens_saved      += saved
-                    self._stats.total_pruner_hits += 1
-                    break
+            result = pruner.compress(text)
+            if result is not None:
+                summary = result
+                saved = max(0, (len(text) - len(summary)) // 4)
+                self._stats.tokens_saved      += saved
+                self._stats.total_pruner_hits += 1
+                break
 
         if summary is not None:
             self._persist(text, pruned=True, summary=summary)
             injection = self._format_injection(summary, line_count)
-            injected  = injection.encode("utf-8")
+            injected  = self._terminal_newlines(injection).encode("utf-8")
             self._stats.total_bytes_injected += len(injected)
             self._emit(stdout_fd, injected)
             _display = injection
@@ -286,6 +301,17 @@ class Orchestrator:
 
         if self.stats_callback is not None:
             self.stats_callback(self._stats)
+
+    def _terminal_newlines(self, text: str) -> str:
+        """Convert text ACK generates itself to CRLF while the terminal is raw.
+
+        Raw mode disables the terminal's NL->CRLF output mapping, so a bare
+        ``\\n`` would leave the cursor in the same column (the "staircase"
+        effect). Child passthrough already carries CRLF from its own PTY.
+        """
+        if self._saved_tty is None:
+            return text
+        return text.replace("\r\n", "\n").replace("\n", "\r\n")
 
     def _emit(self, fd: int, data: bytes) -> None:
         offset = 0
@@ -321,6 +347,24 @@ class Orchestrator:
         )
         return banner + body
 
+    def _is_incomplete_traceback(self, text: str) -> bool:
+        """True if text holds a traceback still streaming its frames.
+
+        A finished traceback ends in a non-indented exception line; while frames
+        are still arriving the last non-blank line is an indented frame line, or
+        the header itself.
+        """
+        if _TRACEBACK_MARKER not in text:
+            return False
+        clean = _ANSI_ESC.sub("", text)
+        nonblank = [ln for ln in clean.splitlines() if ln.strip()]
+        if not nonblank:
+            return False
+        last = nonblank[-1]
+        if _TRACEBACK_MARKER in last:
+            return True
+        return last[:1].isspace()
+
     def _tail_is_prompt(self, chunk: bytes) -> bool:
         tail = chunk[-200:]
         return any(p in tail for p in _PROMPT_BYTES)
@@ -345,13 +389,27 @@ class Orchestrator:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self._saved_tty)
             self._saved_tty = None
 
-    def _install_sigwinch_handler(self) -> None:
-        def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
-            if self._master_fd is not None and sys.stdout.isatty():
-                rows, cols = self._get_terminal_size()
-                self._set_winsize(self._master_fd, rows, cols)
+    def _install_signal_handlers(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        signal.signal(signal.SIGWINCH, self._on_sigwinch)
+        signal.signal(signal.SIGTERM, self._on_terminate)
+        signal.signal(signal.SIGHUP, self._on_terminate)
 
-        signal.signal(signal.SIGWINCH, _handler)
+    def _on_sigwinch(self, signum: int, frame: object) -> None:  # noqa: ARG002
+        if self._master_fd is not None and sys.stdout.isatty():
+            rows, cols = self._get_terminal_size()
+            self._set_winsize(self._master_fd, rows, cols)
+
+    def _on_terminate(self, signum: int, frame: object) -> None:  # noqa: ARG002
+        """Restore the terminal and forward the signal to the child before exit."""
+        self._restore_terminal()
+        if self._child_pid is not None:
+            try:
+                os.killpg(self._child_pid, signum)
+            except OSError:
+                pass
+        os._exit(128 + signum)
 
     @staticmethod
     def _get_terminal_size() -> tuple[int, int]:

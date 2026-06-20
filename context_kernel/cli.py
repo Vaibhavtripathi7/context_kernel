@@ -6,6 +6,7 @@ non-interactively there; plain ack run is the interactive path.
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -22,6 +23,55 @@ from .core.orchestrator import Orchestrator, OrchestratorConfig, OrchestratorSta
 from .memory.pager import Pager
 from .memory.storage import StorageEngine
 from .pruners.shell_pruner import ShellPruner
+
+_USD_PER_MILLION_INPUT_TOKENS = 3.0
+
+_ANSI_OSC   = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_CSI   = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OTHER = re.compile(r"\x1b[@-Z\\-_]")
+_CTRL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize(text: str) -> str:
+    """Strip escape sequences and control chars from stored output before echo."""
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_OTHER.sub("", text)
+    return _CTRL_CHARS.sub("", text)
+
+
+def _print_session_summary(
+    storage: StorageEngine,
+    session_id: str,
+    stats: OrchestratorStats,
+) -> None:
+    """Print a one-glance summary of what ACK saved this session (to stderr)."""
+    db_stats          = storage.stats(session_id)
+    chunks            = db_stats["total_entries"]
+    pruned            = db_stats["pruned_entries"]
+    raw_pruned_tokens = db_stats["tokens_saved"]
+    saved             = stats.tokens_saved
+
+    if chunks == 0:
+        return
+
+    elapsed = max(1, int(time.monotonic() - stats.session_start))
+    pct     = (saved / raw_pruned_tokens * 100) if raw_pruned_tokens else 0.0
+    cost    = saved / 1_000_000 * _USD_PER_MILLION_INPUT_TOKENS
+    rate    = f"{_USD_PER_MILLION_INPUT_TOKENS:g}"
+
+    lines = [
+        click.style("[ACK] Session summary", fg="cyan", bold=True),
+        f"  Chunks intercepted : {chunks:>8,}",
+        f"  Chunks pruned      : {pruned:>8,}",
+        f"  Tokens saved       : {saved:>8,}  (~{pct:.0f}% of pruned output)",
+        f"  Est. cost saved    : ${cost:>7.2f}  (at ${rate}/M input tokens)",
+        f"  Elapsed            : {elapsed:>7}s",
+    ]
+    try:
+        click.echo("\n" + "\n".join(lines), err=True)
+    except (BrokenPipeError, OSError):
+        pass
 
 
 class StatsPanel(Static):
@@ -209,10 +259,14 @@ def cmd_run(
     )
 
     if tui:
-        exit_code = AckDashboard(orchestrator=orch).run()
-        sys.exit(exit_code or 0)
+        exit_code = AckDashboard(orchestrator=orch).run() or 0
     else:
-        sys.exit(orch.run())
+        exit_code = orch.run()
+        if not no_annotate:
+            _print_session_summary(storage, session.session_id, orch.stats)
+
+    storage.close()
+    sys.exit(exit_code)
 
 
 @main.command(name="search")
@@ -259,7 +313,7 @@ def cmd_search(
         pruned    = " [pruned]" if row["was_pruned"] else ""
         click.echo(click.style(f"[{ts}] session={sid_short}… type={etype}{pruned}", fg="cyan"))
 
-        content: str = row["compressed_summary"] or row["raw_content"]
+        content = _sanitize(row["compressed_summary"] or row["raw_content"])
         preview = content[:300].strip()
         if len(content) > 300:
             preview += "\n  …"
@@ -308,7 +362,7 @@ def cmd_sessions(limit: int, db: Path | None) -> None:
     click.echo("─" * 90)
     for row in rows:
         sid   = row["session_id"]
-        cmd   = row["agent_command"][:40]
+        cmd   = _sanitize(row["agent_command"])[:40]
         ts    = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["started_at"]))
         ended = " ✓" if row["ended_at"] else " …"
         click.echo(f"{sid}  {ts}  {cmd}{ended}")

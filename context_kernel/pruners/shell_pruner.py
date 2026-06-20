@@ -132,13 +132,27 @@ class ShellPruner(BasePruner):
             (i for i, ln in enumerate(lines) if _PY_TRACEBACK_HDR.search(ln)),
             0,
         )
-        preamble = "\n".join(lines[:first_tb]).strip()
+        preamble = self._condense_preamble(lines[:first_tb])
 
         result: list[str] = []
         if preamble:
             result.append(preamble)
         result.extend(parts)
         return "\n\n".join(result)
+
+    def _condense_preamble(self, preamble_lines: list[str]) -> str:
+        """Summarise output that precedes a traceback in the same buffer.
+
+        The common "logs, then a crash" pattern means a log flood often shares a
+        buffer with the traceback. Collapse a repetitive preamble to a frequency
+        table instead of dumping it verbatim; keep short, varied preambles as-is.
+        """
+        text = "\n".join(preamble_lines).strip()
+        if not text:
+            return ""
+        if self._is_highly_repetitive(text):
+            return self._compress_repetitive(text)
+        return text
 
     def _compress_rust_errors(self, text: str) -> str:
         lines = text.splitlines()
