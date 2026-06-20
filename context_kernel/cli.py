@@ -6,6 +6,7 @@ non-interactively there; plain ack run is the interactive path.
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -27,6 +28,23 @@ from .pruners.shell_pruner import ShellPruner
 # order-of-magnitude figure (USD per million input tokens); override mentally
 # for your own model. Kept conservative so the saving is never overstated.
 _USD_PER_MILLION_INPUT_TOKENS = 3.0
+
+# Stored output keeps the agent's raw bytes, which include terminal escape
+# sequences (colours, but also cursor/mouse/app-mode toggles). Echoing those
+# verbatim can reprogram the user's terminal, so any stored text printed back
+# is stripped of escape sequences and other control chars first.
+_ANSI_OSC   = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_CSI   = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OTHER = re.compile(r"\x1b[@-Z\\-_]")
+_CTRL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize(text: str) -> str:
+    """Strip escape sequences and control chars from stored output before echo."""
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_OTHER.sub("", text)
+    return _CTRL_CHARS.sub("", text)
 
 
 def _print_session_summary(
@@ -304,7 +322,7 @@ def cmd_search(
         pruned    = " [pruned]" if row["was_pruned"] else ""
         click.echo(click.style(f"[{ts}] session={sid_short}… type={etype}{pruned}", fg="cyan"))
 
-        content: str = row["compressed_summary"] or row["raw_content"]
+        content = _sanitize(row["compressed_summary"] or row["raw_content"])
         preview = content[:300].strip()
         if len(content) > 300:
             preview += "\n  …"
@@ -353,7 +371,7 @@ def cmd_sessions(limit: int, db: Path | None) -> None:
     click.echo("─" * 90)
     for row in rows:
         sid   = row["session_id"]
-        cmd   = row["agent_command"][:40]
+        cmd   = _sanitize(row["agent_command"])[:40]
         ts    = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["started_at"]))
         ended = " ✓" if row["ended_at"] else " …"
         click.echo(f"{sid}  {ts}  {cmd}{ended}")
