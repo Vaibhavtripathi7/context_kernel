@@ -57,7 +57,12 @@ def _print_session_summary(
         f"  Est. cost saved    : ${cost:>7.2f}  (at ${rate}/M input tokens)",
         f"  Elapsed            : {elapsed:>7}s",
     ]
-    click.echo("\n" + "\n".join(lines), err=True)
+    try:
+        click.echo("\n" + "\n".join(lines), err=True)
+    except (BrokenPipeError, OSError):
+        # Downstream (e.g. `... 2>&1 | head`) closed the pipe; never let the
+        # summary crash the run or mask the agent's real exit code.
+        pass
 
 
 class StatsPanel(Static):
