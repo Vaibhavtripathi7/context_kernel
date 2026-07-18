@@ -172,6 +172,34 @@ class TestLogEntryOperations:
         ts   = [r["timestamp"] for r in rows]
         assert ts == sorted(ts, reverse=True)
 
+    def test_get_entry_roundtrip_by_id(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        row_id = engine.insert_entry(
+            self._make_entry(session.session_id, "recall me by id")
+        )
+        row = engine.get_entry(row_id)
+        assert row is not None
+        assert row["id"]          == row_id
+        assert row["raw_content"] == "recall me by id"
+
+    def test_get_entry_returns_none_for_unknown_id(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        assert engine.get_entry(999_999) is None
+
+    def test_get_entry_fetches_the_exact_row_among_many(
+        self, engine: StorageEngine, session: SessionRecord
+    ) -> None:
+        ids = [
+            engine.insert_entry(self._make_entry(session.session_id, f"entry {i}"))
+            for i in range(5)
+        ]
+        target = ids[2]
+        row = engine.get_entry(target)
+        assert row is not None
+        assert row["raw_content"] == "entry 2"
+
     def test_bulk_insert_all_or_nothing(
         self, engine: StorageEngine, session: SessionRecord
     ) -> None:
