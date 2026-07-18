@@ -10,6 +10,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -318,6 +319,80 @@ def cmd_search(
         if len(content) > 300:
             preview += "\n  …"
         click.echo(f"  {preview}\n")
+
+
+@main.command(name="recall")
+@click.argument("target")
+@click.option(
+    "--session",
+    "session_id",
+    default=None,
+    metavar="SESSION_ID",
+    help="Session to search when TARGET is a query (default: most recent).",
+)
+@click.option(
+    "--all",
+    "all_sessions",
+    is_flag=True,
+    default=False,
+    help="Search every session, not just the most recent.",
+)
+@click.option(
+    "--limit",
+    default=1,
+    show_default=True,
+    type=int,
+    help="Max entries to return when TARGET is a query.",
+)
+@click.option(
+    "--raw",
+    is_flag=True,
+    default=False,
+    help="Print exact stored bytes without stripping escape sequences.",
+)
+@click.option(
+    "--db",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Path to the ACK SQLite database.",
+)
+def cmd_recall(
+    target:       str,
+    session_id:   str | None,
+    all_sessions: bool,
+    limit:        int,
+    raw:          bool,
+    db:           Path | None,
+) -> None:
+    """Page a stored log back into view by handle or query.
+
+    TARGET is either a numeric recall handle (the "ack #N" shown on a pruned
+    banner -> `ack recall N`) or an FTS5 query, in which case the best match
+    from the most recent session is returned. Use --all to widen the search.
+    """
+    render: Callable[[str], str] = (lambda t: t) if raw else _sanitize
+    storage = StorageEngine(db_path=db) if db else StorageEngine()
+    with storage:
+        if target.isdigit():
+            row  = storage.get_entry(int(target))
+            rows = [row] if row is not None else []
+        else:
+            scope = session_id
+            if scope is None and not all_sessions:
+                recent = storage.list_sessions(limit=1)
+                scope  = recent[0]["session_id"] if recent else None
+            rows = storage.search(target, session_id=scope, limit=limit)
+
+    if not rows:
+        click.echo(f"No entry for: {target!r}", err=True)
+        sys.exit(1)
+
+    for row in rows:
+        sid_short = row["session_id"][:8]
+        ts        = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["timestamp"]))
+        pruned    = " [pruned]" if row["was_pruned"] else ""
+        click.echo(click.style(f"[ack #{row['id']}] session={sid_short}… {ts}{pruned}", fg="cyan"))
+        click.echo(render(row["raw_content"]))
 
 
 @main.command(name="toc")
