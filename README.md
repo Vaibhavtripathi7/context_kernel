@@ -5,12 +5,12 @@
 
 ACK is a transparent proxy between you and any terminal AI agent (Aider, Claude Code, and others). It collapses the noisy, high-token output that pollutes the context window (stack traces, build-error walls, log floods) into its actionable signal, and archives the full untouched stream to a local searchable database.
 
-Your agent sees the summary. The full log is one `ack search` away.
+Your agent sees the signal. The full log is one `ack recall` away — for you *and* the agent itself.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-POSIX-lightgrey.svg)
-![Tests](https://img.shields.io/badge/tests-97%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-107%20passing-brightgreen.svg)
 
 ---
 
@@ -69,15 +69,26 @@ Every flushed buffer is handled in order:
 3. **Large blobs run through ordered pruners.** First match wins: a hit injects a compact summary, a miss passes through.
 4. **Everything is persisted.** The summary is a view, never a deletion.
 
-When a pruner fires you see exactly what happened:
+When a pruner fires you see exactly what happened — and a stable handle to page the original back:
 
 ```
-[ACK] Compressed 63 lines → 4 lines  (full log stored in DB)
+[ACK] Compressed 63 lines → 4 lines  (recall: ack #42)
 ── Traceback ──
   at /app/src/views/checkout.py:201 in post
   at /app/src/models/cart.py:88 in checkout
   ↳ KeyError: 'card_token'
 ```
+
+### Recall: the archive is readable, not just written
+
+Pruning that you can't undo is just lossy compression. ACK stamps every pruned injection with a handle (`ack #42`) and exposes `ack recall` as a plain shell command — so when the summary isn't enough, the exact original bytes come back on demand, by handle or by search:
+
+```bash
+ack recall 42                     # page back the full log behind that banner
+ack recall "card_token"           # or find it by content, scoped to this session
+```
+
+Because it's an ordinary command, the **agent** can run it too: it drops the 60-frame wall, keeps working from the summary, and pulls the verbatim detail back only if it actually needs it. A [benchmark](scripts/run_recall_benchmark.py) shows this recovers every dropped detail at ~80% fewer tokens than never pruning at all.
 
 ---
 
@@ -106,6 +117,10 @@ ack run -- claude --dangerously-skip-permissions
 # Search the full archive of every session (FTS5 syntax, BM25 ranked)
 ack search "ImportError OR ModuleNotFoundError"
 
+# Page a pruned log back — by its `ack #N` handle, or by content
+ack recall 42
+ack recall "ImportError"
+
 # Symbol map of a file instead of dumping the whole thing
 ack toc context_kernel/core/orchestrator.py
 
@@ -117,10 +132,10 @@ ack sessions
 
 ```bash
 ack run -- python examples/crashing_agent.py
-ack search "KeyError"
+ack recall "KeyError"        # page the full traceback back by content
 ```
 
-The flood collapses to a one-line frequency table, the traceback to its two user frames plus the exception, and the original is still searchable. When the agent exits, ACK prints exactly what it saved:
+The flood collapses to a one-line frequency table, the traceback to its two user frames plus the exception, and the original is still recoverable verbatim. When the agent exits, ACK prints exactly what it saved:
 
 ```
 [ACK] Session summary
@@ -166,6 +181,8 @@ The built-in `ShellPruner` targets the three biggest offenders. The original byt
 | `--tui` | off | Experimental Textual stats dashboard. |
 
 **`ack search "<query>"`** takes an FTS5 expression (`AND`/`OR`/`NOT`, prefix, phrase) and ranks results by BM25. Options: `--session`, `--limit` (default 20), `--db`.
+
+**`ack recall <id|query>`** pages a stored log back. A numeric argument is an `ack #N` handle (exact lookup); anything else is a search, scoped to the most recent session by default. Options: `--session`, `--all` (search every session), `--limit` (default 1), `--raw` (skip escape-sequence sanitisation), `--db`.
 
 **`ack toc <file>`** prints a symbol table-of-contents (Python today).
 
@@ -214,9 +231,10 @@ Register with `pruners=[MyPruner(), ShellPruner()]` on the `Orchestrator`. Prune
 
 ```bash
 poetry install
-poetry run pytest                        # 97 tests (unit + integration)
+poetry run pytest                        # 107 tests (unit + integration)
 poetry run pytest -m "not integration"   # fast unit tests only
-poetry run python scripts/run_benchmarks.py
+poetry run python scripts/run_benchmarks.py          # L1 compression / fidelity
+poetry run python scripts/run_recall_benchmark.py    # L2 needle recovery
 poetry run ruff check context_kernel scripts
 poetry run mypy context_kernel           # strict
 ```
