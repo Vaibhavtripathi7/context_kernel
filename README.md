@@ -243,6 +243,30 @@ CI runs ruff, mypy `--strict`, the full suite, and the benchmark on every push a
 
 ---
 
+## Roadmap
+
+ACK is one piece of a larger idea: treat the context window as a scarce resource
+to be managed, and keep deterministic work out of the model's way. The pruner you
+see today is the first of three layers.
+
+- **L1 — output reduction** *(shipped).* The pruners. Collapse deterministic
+  noise — tracebacks, build-error walls, log floods — to its signal before it
+  ever reaches the model.
+- **L2 — memory paging** *(in progress).* The archive plus `ack recall`. Pruned
+  detail is recoverable on demand, so compression is never a one-way loss.
+  Shipped: stable `ack #N` handles and recall by id or content. Next:
+  - **Proactive dedup** — content-hash repeated output so the same error isn't re-paged across turns.
+  - **Pager narrowing** — recall just the errored function, not the whole log.
+  - **A context-health signal** — detect repetition and re-run-the-same-command loops as a deterministic paging trigger, instead of a fixed token threshold.
+- **L3 — execution offload** *(exploring).* Run well-specified, deterministic
+  sub-tasks outside the model entirely and hand back only the result.
+
+Layers compound: L1 shrinks what enters the window, L2 makes that shrink safe to
+undo, L3 keeps whole tasks out of the window to begin with. Issues and PRs
+against any layer are welcome — see [CONTRIBUTING](CONTRIBUTING.md).
+
+---
+
 ## Limitations
 
 - **POSIX only** (uses `pty`/`fork`/`termios`); use WSL on Windows.
