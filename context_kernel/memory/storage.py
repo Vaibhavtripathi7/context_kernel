@@ -295,6 +295,18 @@ class StorageEngine:
             (query, limit),
         ).fetchall()
 
+    def get_entry(self, entry_id: int) -> sqlite3.Row | None:
+        """Fetch a single log entry by its primary-key id, or None if absent.
+
+        This is the direct-lookup path behind `ack recall <id>`: the recall
+        handle stamped on a pruned injection is exactly this id.
+        """
+        row: sqlite3.Row | None = self._db.execute(
+            "SELECT * FROM log_entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        return row
+
     def get_recent_entries(self, session_id: str, limit: int = 50) -> list[sqlite3.Row]:
         return self._db.execute(
             """

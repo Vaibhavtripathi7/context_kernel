@@ -285,8 +285,8 @@ class Orchestrator:
                 break
 
         if summary is not None:
-            self._persist(text, pruned=True, summary=summary)
-            injection = self._format_injection(summary, line_count)
+            entry_id  = self._persist(text, pruned=True, summary=summary)
+            injection = self._format_injection(summary, line_count, entry_id)
             injected  = self._terminal_newlines(injection).encode("utf-8")
             self._stats.total_bytes_injected += len(injected)
             self._emit(stdout_fd, injected)
@@ -321,7 +321,9 @@ class Orchestrator:
             except OSError:
                 break
 
-    def _persist(self, text: str, *, pruned: bool, summary: str = "") -> None:
+    def _persist(self, text: str, *, pruned: bool, summary: str = "") -> int | None:
+        """Store one entry and return its row id (the recall handle), or None
+        if the write failed — a failed archive must never abort the session."""
         entry = LogEntry(
             session_id=self.session_id,
             raw_content=text,
@@ -331,19 +333,22 @@ class Orchestrator:
             was_pruned=pruned,
         )
         try:
-            self.storage.insert_entry(entry)
+            return self.storage.insert_entry(entry)
         except Exception:  # noqa: BLE001
-            pass
+            return None
 
-    def _format_injection(self, summary: str, original_lines: int) -> str:
+    def _format_injection(
+        self, summary: str, original_lines: int, entry_id: int | None = None
+    ) -> str:
         body = f"{_CYAN}{summary}{_RESET}\n"
         if not self.config.annotate_injections:
             return body
 
         summary_lines = len(summary.splitlines())
+        recall = f"recall: ack #{entry_id}" if entry_id is not None else "full log stored in DB"
         banner = (
             f"{_DIM}[ACK] Compressed {original_lines} lines → "
-            f"{summary_lines} lines  (full log stored in DB){_RESET}\n"
+            f"{summary_lines} lines  ({recall}){_RESET}\n"
         )
         return banner + body
 

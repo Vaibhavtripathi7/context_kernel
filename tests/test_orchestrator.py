@@ -144,6 +144,17 @@ class TestInjectionFormatting:
         result = orch._format_injection("short summary", original_lines=80)  # type: ignore[attr-defined]
         assert "[ACK]" not in result
 
+    def test_banner_shows_recall_handle_when_id_present(self, storage: StorageEngine) -> None:
+        orch = _make_orchestrator(storage, annotate=True)
+        result = orch._format_injection("short summary", 80, entry_id=42)  # type: ignore[attr-defined]
+        assert "recall: ack #42" in result
+
+    def test_banner_falls_back_when_id_missing(self, storage: StorageEngine) -> None:
+        orch = _make_orchestrator(storage, annotate=True)
+        result = orch._format_injection("short summary", 80, entry_id=None)  # type: ignore[attr-defined]
+        assert "ack #" not in result
+        assert "full log stored in DB" in result
+
     def test_summary_text_always_in_output(self, storage: StorageEngine) -> None:
         orch = _make_orchestrator(storage, annotate=True)
         result = orch._format_injection("ValueError: bad arg\n  at app/main.py:5", 30)  # type: ignore[attr-defined]
