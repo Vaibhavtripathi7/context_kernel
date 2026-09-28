@@ -1,16 +1,19 @@
 """Command-line entrypoint."""
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 import click
 
+from .core import executor
 from .core.orchestrator import Orchestrator, OrchestratorConfig, OrchestratorStats
-from .memory.storage import StorageEngine
+from .memory.storage import _DEFAULT_DB, StorageEngine
 from .pruners.shell_pruner import ShellPruner
 
 _USD_PER_MILLION_INPUT_TOKENS = 3.0
@@ -137,6 +140,93 @@ def cmd_run(
 
     storage.close()
     sys.exit(exit_code)
+
+
+_EXEC_ARCHIVE_UNPRUNED_MAX = 64 * 1024
+
+
+def _exec_or_die(path: str, argv: list[str]) -> NoReturn:
+    """Replace this process with argv, or report the failure like a shell would."""
+    try:
+        os.execv(path, argv)
+    except OSError as exc:
+        click.echo(f"ack: cannot run {path}: {exc.strerror}", err=True)
+        sys.exit(127)
+
+
+@main.command(name="exec")
+@click.argument("command", nargs=-1, required=True)
+@click.option(
+    "--claude",
+    "claude_script",
+    is_flag=True,
+    help="COMMAND is one script from Claude Code's shell prefix (set by `ack hook install`).",
+)
+@click.option("--session", "session_id", default=None, metavar="ID",
+              help="Archive under this session id.")
+@click.option("--db", default=None, type=click.Path(path_type=Path),
+              help="Path to the ACK SQLite database.")
+def cmd_exec(
+    command:       tuple[str, ...],
+    claude_script: bool,
+    session_id:    str | None,
+    db:            Path | None,
+) -> None:
+    """Run COMMAND and prune its output before the agent reads it.
+
+    Example: ack exec -- pytest -x
+    """
+    if claude_script:
+        script = command[-1]
+        if not executor.is_bash_tool_script(script):
+            # Claude's hooks run as Claude runs them.
+            _exec_or_die("/bin/sh", ["/bin/sh", "-c", script])
+        shell = executor.shell_for(script)
+        argv  = [shell, "-c", script]
+        if executor.invokes_ack_reader(script):
+            _exec_or_die(shell, argv)  # ACK's own readers are never pruned again
+        session_id = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        agent = "claude"
+    else:
+        argv  = list(command)
+        agent = " ".join(argv)
+
+    try:
+        db_path, fallback = (db, False) if db else executor.writable_archive(_DEFAULT_DB)
+        storage = StorageEngine(db_path=db_path)
+        storage.open()
+        if session_id:
+            storage.ensure_session(session_id, agent)
+        else:
+            session_id = storage.create_session(agent).session_id
+        hint = executor.recall_hint(
+            Path(sys.argv[0]), db_path, explicit_db=fallback or db is not None
+        )
+        orch = Orchestrator(
+            command=argv,
+            session_id=session_id,
+            storage=storage,
+            pruners=[ShellPruner()],
+            config=OrchestratorConfig(
+                color=False,
+                recall_hint=hint,
+                archive_unpruned_max_bytes=_EXEC_ARCHIVE_UNPRUNED_MAX,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        # ACK must never be the reason a command fails: run it unmodified.
+        try:
+            os.execvp(argv[0], argv)
+        except OSError as exc:
+            click.echo(f"ack: cannot run {argv[0]}: {exc.strerror}", err=True)
+            sys.exit(127)
+
+    code = executor.run_piped(argv, orch, sys.stdout.fileno())
+    try:
+        storage.close()
+    except Exception:  # noqa: BLE001
+        pass  # the command already ran; a close failure must not change its exit code
+    sys.exit(code)
 
 
 @main.command(name="search")
