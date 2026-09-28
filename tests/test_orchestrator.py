@@ -153,7 +153,7 @@ class TestInjectionFormatting:
         orch = _make_orchestrator(storage, annotate=True)
         result = orch._format_injection("short summary", 80, entry_id=None)  # type: ignore[attr-defined]
         assert "ack #" not in result
-        assert "full log stored in DB" in result
+        assert "full log not archived" in result
 
     def test_summary_text_always_in_output(self, storage: StorageEngine) -> None:
         orch = _make_orchestrator(storage, annotate=True)
@@ -620,3 +620,109 @@ class TestOrchestratorIntegration:
         """)
         out = self._run_driver(driver, tmp_path)
         assert "terminal_ok=True" in out
+
+
+def _exec_orchestrator(
+    storage: StorageEngine,
+    pruners: Optional[list[BasePruner]] = None,
+    **config: object,
+) -> Orchestrator:
+    session = storage.create_session("exec-test")
+    return Orchestrator(
+        command=["exec-test"],
+        session_id=session.session_id,
+        storage=storage,
+        pruners=pruners or [],
+        config=OrchestratorConfig(pruning_threshold_lines=5, **config),  # type: ignore[arg-type]
+    )
+
+
+class _AlwaysPrune(BasePruner):
+    metadata = PrunerMetadata(name="always", description="test")
+
+    def matches(self, text: str) -> bool:
+        return True
+
+    def compress(self, text: str) -> str | None:
+        return "SUMMARY"
+
+
+class _Explodes(BasePruner):
+    metadata = PrunerMetadata(name="explodes", description="test")
+
+    def matches(self, text: str) -> bool:
+        return True
+
+    def compress(self, text: str) -> str | None:
+        raise RuntimeError("pruner bug")
+
+
+class TestExecBanner:
+    def test_plain_banner_has_no_escape_codes(self, storage: StorageEngine) -> None:
+        orch = _exec_orchestrator(storage, color=False)
+        out = orch._format_injection("summary", 80, entry_id=3)  # type: ignore[attr-defined]
+        assert "\x1b" not in out
+
+    def test_recall_hint_names_the_command(self, storage: StorageEngine) -> None:
+        orch = _exec_orchestrator(storage, color=False, recall_hint="ack recall")
+        out = orch._format_injection("summary", 80, entry_id=3)  # type: ignore[attr-defined]
+        assert "(full log: ack recall 3)" in out
+
+
+class TestFeedAndFlush:
+    def test_flush_emits_and_prunes(self, storage: StorageEngine, pipe_pair) -> None:
+        r, w = pipe_pair
+        orch = _exec_orchestrator(storage, [_AlwaysPrune()], color=False)
+        orch.feed(b"line\n" * 40)
+        assert orch.buffered_bytes == 200
+        orch.flush(w, final=True)
+        out = _read_pipe(r).decode()
+        assert "SUMMARY" in out
+        assert orch.buffered_bytes == 0
+
+    def test_split_utf8_char_is_carried_to_next_flush(
+        self, storage: StorageEngine, pipe_pair
+    ) -> None:
+        r, w = pipe_pair
+        orch = _exec_orchestrator(storage, color=False)
+        fire = "🔥".encode()
+        orch.feed(b"ok " + fire[:2])
+        orch.flush(w)
+        orch.feed(fire[2:] + b" done\n")
+        orch.flush(w, final=True)
+        assert _read_pipe(r) == b"ok " + fire + b" done\n"
+        stored = [row["raw_content"] for row in storage.get_recent_entries(orch.session_id)]
+        assert all("ð" not in text for text in stored)
+        assert any("🔥" in text for text in stored)
+
+    def test_pruner_exception_falls_back_to_raw(
+        self, storage: StorageEngine, pipe_pair
+    ) -> None:
+        r, w = pipe_pair
+        orch = _exec_orchestrator(storage, [_Explodes()], color=False)
+        orch.feed(b"raw line\n" * 40)
+        orch.flush(w, final=True)
+        assert _read_pipe(r) == b"raw line\n" * 40
+
+    def test_large_unpruned_output_not_archived(
+        self, storage: StorageEngine, pipe_pair
+    ) -> None:
+        r, w = pipe_pair
+        orch = _exec_orchestrator(storage, color=False, archive_unpruned_max_bytes=1000)
+        big = b"".join(f"unique line {i}\n".encode() for i in range(200))
+        orch.feed(big)
+        orch.flush(w, final=True)
+        assert _read_pipe(r, timeout=1.0) == big
+        assert storage.stats(orch.session_id)["total_entries"] == 0
+
+    def test_pruned_output_always_archived(
+        self, storage: StorageEngine, pipe_pair
+    ) -> None:
+        r, w = pipe_pair
+        orch = _exec_orchestrator(
+            storage, [_AlwaysPrune()], color=False, archive_unpruned_max_bytes=10
+        )
+        orch.feed(b"line\n" * 400)
+        orch.flush(w, final=True)
+        _read_pipe(r)
+        assert storage.stats(orch.session_id)["pruned_entries"] == 1
