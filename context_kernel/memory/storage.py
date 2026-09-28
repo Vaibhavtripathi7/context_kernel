@@ -89,6 +89,7 @@ class StorageEngine:
 
     def _apply_pragmas(self) -> None:
         for pragma in (
+            "PRAGMA busy_timeout = 5000",
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous  = NORMAL",
             "PRAGMA foreign_keys = ON",
@@ -102,7 +103,7 @@ class StorageEngine:
     def _transaction(self) -> Generator[sqlite3.Connection]:
         with self._write_lock:
             db = self._db
-            db.execute("BEGIN")
+            db.execute("BEGIN IMMEDIATE")
             try:
                 yield db
                 db.execute("COMMIT")
@@ -188,6 +189,16 @@ class StorageEngine:
                 (rec.session_id, rec.agent_command, rec.started_at),
             )
         return rec
+
+    def ensure_session(self, session_id: str, agent_command: str) -> None:
+        """Create the session row unless it exists. Safe when several processes
+        race to create the same session (one per command in an agent session)."""
+        with self._transaction() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO sessions(session_id, agent_command, started_at) "
+                "VALUES (?,?,?)",
+                (session_id, agent_command, time.time()),
+            )
 
     def close_session(self, session_id: str, tokens_saved: int = 0) -> None:
         with self._transaction() as db:
