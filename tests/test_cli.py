@@ -1,6 +1,8 @@
 """CLI tests: terminal-escape sanitisation and the `recall` command."""
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -98,3 +100,15 @@ class TestRecall:
             main, ["recall", str(evil), "--raw", "--db", str(db_path)], color=True
         )
         assert "\x1b[31m" in result.output
+
+
+class TestStartupImports:
+    def test_cli_import_skips_tui_and_tree_sitter(self) -> None:
+        code = (
+            "import sys, context_kernel.cli; "
+            "print('textual' in sys.modules, 'tree_sitter' in sys.modules)"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert out == "False False"
