@@ -45,11 +45,18 @@ class TestScriptRouting:
         "/home/u/.venv/bin/ack recall 3",
         "ack recall 'KeyError' | head -n 5",
         "poetry run ack search foo",
+        "'/home/u/my env/ack' recall 3",
     ])
     def test_ack_readers_detected(self, cmd: str) -> None:
         assert executor.invokes_ack_reader(f"x && eval '{cmd}' < /dev/null")
 
-    @pytest.mark.parametrize("cmd", ["echo stack recall", "python3 -m pack recall", "ls"])
+    @pytest.mark.parametrize("cmd", [
+        "echo stack recall",
+        "python3 -m pack recall",
+        "ls",
+        'grep "/var/ack" search.log',
+        "grep /var/ack search.log",
+    ])
     def test_other_commands_not_detected(self, cmd: str) -> None:
         assert not executor.invokes_ack_reader(f"x && eval '{cmd}' < /dev/null")
 

@@ -24,7 +24,7 @@ from types import FrameType
 from .orchestrator import Orchestrator
 
 _BASH_TOOL_MARKERS = (" eval ", "pwd -P >|")
-_ACK_READER        = re.compile(r"""(?:^|[\s/'"(;&|])ack\s+(?:recall|search)\b""")
+_ACK_READER        = re.compile(r"""(?:^|[\s/'"(;&|])ack['"]?\s+(?:recall|search)(?=[\s'"]|$)""")
 _SNAPSHOT_SHELL    = re.compile(r"snapshot-(bash|zsh)-")
 _FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
