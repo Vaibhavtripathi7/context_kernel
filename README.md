@@ -7,6 +7,7 @@ ACK is a transparent proxy between you and any terminal AI agent (Aider, Claude 
 
 Your agent sees the signal. The full log is one `ack recall` away — for you *and* the agent itself.
 
+[![Website](https://img.shields.io/badge/website-ack--context--kernel.vercel.app-4f6f4c.svg)](https://ack-context-kernel.vercel.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-POSIX-lightgrey.svg)
