@@ -101,6 +101,36 @@ class TestRecall:
         )
         assert "\x1b[31m" in result.output
 
+    def _seed_two_sessions(self, db_path: Path) -> None:
+        with StorageEngine(db_path=db_path) as eng:
+            for sid, started in (("claude-old", 1000.0), ("claude-new", 2000.0)):
+                eng.ensure_session(sid, "claude")
+                eng._db.execute(
+                    "UPDATE sessions SET started_at = ? WHERE session_id = ?", (started, sid)
+                )
+                eng.insert_entry(LogEntry(session_id=sid, raw_content=f"pytest failed in {sid}",
+                                          entry_type="stdout"))
+
+    def _query(self, db_path: Path, env: dict[str, str | None]) -> str:
+        result = CliRunner().invoke(
+            main, ["recall", "failed", "--db", str(db_path)], env=env
+        )
+        assert result.exit_code == 0
+        return result.output
+
+    def test_query_searches_the_current_claude_session(self, db_path: Path) -> None:
+        self._seed_two_sessions(db_path)
+        out = self._query(db_path, {"CLAUDE_CODE_SESSION_ID": "claude-old"})
+        assert "pytest failed in claude-old" in out
+        assert "claude-new" not in out
+
+    def test_query_uses_latest_session_without_a_known_claude_session(
+        self, db_path: Path
+    ) -> None:
+        self._seed_two_sessions(db_path)
+        for env in ({"CLAUDE_CODE_SESSION_ID": None}, {"CLAUDE_CODE_SESSION_ID": "unknown"}):
+            assert "pytest failed in claude-new" in self._query(db_path, env)
+
 
 class TestStartupImports:
     def test_cli_import_skips_tui_and_tree_sitter(self) -> None:

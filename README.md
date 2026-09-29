@@ -195,7 +195,7 @@ The built-in `ShellPruner` targets the three biggest offenders. The original byt
 
 **`ack search "<query>"`** takes an FTS5 expression (`AND`/`OR`/`NOT`, prefix, phrase) and ranks results by BM25. Options: `--session`, `--limit` (default 20), `--db`.
 
-**`ack recall <id|query>`** pages a stored log back. A numeric argument is an `ack #N` handle (exact lookup); anything else is a search, scoped to the most recent session by default. Options: `--session`, `--all` (search every session), `--limit` (default 1), `--raw` (skip escape-sequence sanitisation), `--db`.
+**`ack recall <id|query>`** pages a stored log back. A numeric argument is an `ack #N` handle (exact lookup); anything else is a search, scoped by default to the current Claude Code session, or the most recent session outside Claude. Options: `--session`, `--all` (search every session), `--limit` (default 1), `--raw` (skip escape-sequence sanitisation), `--db`.
 
 **`ack toc <file>`** prints a symbol table-of-contents (Python today).
 

@@ -324,7 +324,8 @@ def cmd_search(
     "session_id",
     default=None,
     metavar="SESSION_ID",
-    help="Session to search when TARGET is a query (default: most recent).",
+    help="Session to search when TARGET is a query (default: current Claude session, "
+         "else most recent).",
 )
 @click.option(
     "--all",
@@ -364,7 +365,8 @@ def cmd_recall(
 
     TARGET is either a numeric recall handle (the "ack #N" shown on a pruned
     banner -> `ack recall N`) or an FTS5 query, in which case the best match
-    from the most recent session is returned. Use --all to widen the search.
+    from the current Claude session (or else the most recent one) is returned.
+    Use --all to widen the search.
     """
     render: Callable[[str], str] = (lambda t: t) if raw else _sanitize
     storage = StorageEngine(db_path=db) if db else StorageEngine()
@@ -375,8 +377,13 @@ def cmd_recall(
         else:
             scope = session_id
             if scope is None and not all_sessions:
-                recent = storage.list_sessions(limit=1)
-                scope  = recent[0]["session_id"] if recent else None
+                # Under `ack exec`, the latest session may be another Claude window.
+                current = os.environ.get("CLAUDE_CODE_SESSION_ID")
+                if current and storage.get_session(current) is not None:
+                    scope = current
+                else:
+                    recent = storage.list_sessions(limit=1)
+                    scope  = recent[0]["session_id"] if recent else None
             rows = storage.search(target, session_id=scope, limit=limit)
 
     if not rows:
