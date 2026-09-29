@@ -124,6 +124,19 @@ class TestInstall:
             install(project, fake_ack, python=Path("/bin/false"))
         assert not (project / ".claude" / "settings.local.json").exists()
 
+    def test_self_test_fails_when_ack_cannot_import(
+        self, home: Path, project: Path, fake_ack: Path, tmp_path: Path
+    ) -> None:
+        # -S hides site-packages, so context_kernel is gone but python still
+        # runs, like an editable install whose clone was moved. The shim's
+        # fallback then runs the command with plain sh, so ACK never sees it.
+        no_site = tmp_path / "python"
+        no_site.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -S "$@"\n')
+        no_site.chmod(0o755)
+        with pytest.raises(HookError, match="self-test"):
+            install(project, fake_ack, python=no_site)
+        assert not (project / ".claude" / "settings.local.json").exists()
+
     def test_reinstall_with_broken_python_leaves_shim_working(
         self, home: Path, project: Path, fake_ack: Path
     ) -> None:

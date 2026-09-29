@@ -48,6 +48,7 @@ def render_shim(python: Path, ack_script: Path) -> str:
         "try:\n"
         "    from context_kernel.cli import main\n"
         "except BaseException:\n"
+        '    os.environ["ACK_SHIM_FALLBACK"] = "1"\n'
         '    m = re.search(r"snapshot-(bash|zsh)-", script)\n'
         '    sh = m and shutil.which(m.group(1)) or "/bin/sh"\n'
         '    os.execv(sh, [sh, "-c", script])\n'
@@ -71,6 +72,7 @@ def render_shim(python: Path, ack_script: Path) -> str:
         "    *)                sh=/bin/sh ;;\n"
         "esac\n"
         'command -v "$sh" >/dev/null 2>&1 || sh=/bin/sh\n'
+        "export ACK_SHIM_FALLBACK=1\n"
         'exec "$sh" -c "$last"\n'
     )
 
@@ -146,7 +148,7 @@ def _install_shim(python: Path, ack_script: Path) -> Path:
         with os.fdopen(fd, "w") as f:
             f.write(render_shim(python, ack_script))
         tmp.chmod(0o755)
-        _self_test(tmp)
+        _self_test(tmp, python)
         os.replace(tmp, shim)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -154,8 +156,14 @@ def _install_shim(python: Path, ack_script: Path) -> Path:
     return shim
 
 
-def _self_test(shim: Path) -> None:
-    script = "true && eval 'echo ack-ok' < /dev/null && pwd -P >| /dev/null"
+def _self_test(shim: Path, python: Path) -> None:
+    """Run a script through the shim and check ACK itself handled it.
+
+    Both fallback paths (a missing python/ack file, or ack_script that
+    cannot import) set ACK_SHIM_FALLBACK before running the script with a
+    plain shell, so a marker of "1" means ACK never started.
+    """
+    script = "true && eval 'echo ack-ok:${ACK_SHIM_FALLBACK:-0}' < /dev/null && pwd -P >| /dev/null"
     try:
         result = subprocess.run(  # noqa: S603
             [str(shim), script], capture_output=True, text=True, timeout=30,
@@ -163,7 +171,12 @@ def _self_test(shim: Path) -> None:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise HookError(f"self-test could not run the shim: {exc}") from exc
-    if result.returncode != 0 or "ack-ok" not in result.stdout:
+    if "ack-ok:1" in result.stdout:
+        raise HookError(
+            f"self-test failed: the shim ran the command without ACK "
+            f"(ACK could not start with {python})"
+        )
+    if result.returncode != 0 or "ack-ok:0" not in result.stdout:
         raise HookError(f"self-test failed:\n{result.stdout}{result.stderr}".rstrip())
 
 
