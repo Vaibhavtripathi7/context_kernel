@@ -31,7 +31,9 @@ _CYAN  = "\033[36m"
 _RESET = "\033[0m"
 
 _ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
-_TRACEBACK_MARKER = "Traceback (most recent call last):"
+# Anchored to match the pruner's own header check, so a mention inside code or
+# a string (a `cat` of Python source) is not taken for a real traceback.
+_TRACEBACK_HDR = re.compile(r"^\s*Traceback \(most recent call last\):", re.MULTILINE)
 _MAX_SUMMARY_RATIO = 0.75  # a summary must be at least 25% shorter than its input
 
 
@@ -424,14 +426,14 @@ class Orchestrator:
         are still arriving the last non-blank line is an indented frame line, or
         the header itself.
         """
-        if _TRACEBACK_MARKER not in text:
-            return False
         clean = _ANSI_ESC.sub("", text)
+        if not _TRACEBACK_HDR.search(clean):
+            return False
         nonblank = [ln for ln in clean.splitlines() if ln.strip()]
         if not nonblank:
             return False
         last = nonblank[-1]
-        if _TRACEBACK_MARKER in last:
+        if _TRACEBACK_HDR.match(last):
             return True
         return last[:1].isspace()
 

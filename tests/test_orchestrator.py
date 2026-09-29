@@ -367,6 +367,26 @@ class TestIncompleteTracebackBuffering:
         assert b"ValueError" in data, "A finished traceback must be emitted."
         assert not orch._buffer
 
+    def test_traceback_mention_in_code_is_not_held(
+        self, storage: StorageEngine, pipe_pair: tuple[int, int]
+    ) -> None:
+        """A `cat` of source that mentions the marker mid-line, ending on an
+        indented line, is not a real traceback and must not be held."""
+        r_fd, w_fd = pipe_pair
+        orch = _make_orchestrator(storage, threshold=2)
+        text = (
+            "def foo():\n"
+            '    msg = "Traceback (most recent call last):"\n'
+            "    return msg\n"
+        )
+        orch._buffer = [text.encode()]
+
+        orch._flush_buffer(w_fd, force=False)  # type: ignore[attr-defined]
+
+        data = _read_pipe(r_fd)
+        assert data == text.encode()
+        assert not orch._buffer
+
     def test_incomplete_traceback_flushed_when_forced(
         self, storage: StorageEngine, pipe_pair: tuple[int, int]
     ) -> None:
