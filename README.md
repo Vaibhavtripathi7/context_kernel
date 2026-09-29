@@ -1,7 +1,7 @@
 
 # ACK: Agent Context Kernel
 
-**Intelligent memory middleware for terminal AI coding agents.**
+**Deterministic output pruning for AI coding agents, with the full log one command away.**
 
 ACK sits between a terminal AI agent and the commands it runs. It collapses the noisy, high-token output that pollutes the context window (stack traces, build-error walls, log floods) into its actionable signal before the model reads it, and archives the full untouched output to a local searchable database. For Claude Code it plugs in with one command, `ack hook install`; any other agent can run its commands through `ack exec`.
 
@@ -258,25 +258,33 @@ CI runs ruff, mypy `--strict`, the full suite, and the benchmark on every push a
 
 ## Roadmap
 
-ACK is one piece of a larger idea: treat the context window as a scarce resource
-to be managed, and keep deterministic work out of the model's way. The pruner you
-see today is the first of three layers.
+The goal is a kernel for coding agents: a deterministic layer between the model
+and the machine that handles what doesn't need a model and keeps the ground truth
+of what actually ran. A token should reach the model only when producing or
+reading it needs judgment. Pruning is the first of three layers.
 
-- **L1: output reduction** *(shipped).* The pruners. Collapse deterministic
-  noise (tracebacks, build-error walls, log floods) to its signal before it
-  ever reaches the model.
+- **L1: output reduction** *(shipped).* Collapse deterministic noise (tracebacks,
+  build-error walls, log floods) to its signal before the model reads it, through
+  `ack hook install` for Claude Code or `ack exec` for any agent. Next:
+  - **More agents**: native hooks for Codex and Gemini CLI.
+  - **More formats**: pytest's own failure output, and `\r` progress bars collapsed to their last state.
 - **L2: memory paging** *(in progress).* The archive plus `ack recall`. Pruned
   detail is recoverable on demand, so compression is never a one-way loss.
-  Shipped: stable `ack #N` handles and recall by id or content. Next:
+  Shipped: stable `ack #N` handles, recall by id or content scoped to the current
+  agent session, and a banner the model follows on its own. Next:
+  - **Ground-truth state**: `ack state` prints what is failing now, what changed since the last green run, and which commands ran, built from what actually executed rather than what the model remembers.
+  - **Claim checks**: flag an agent saying "tests pass" when the last recorded run failed.
   - **Proactive dedup**: content-hash repeated output so the same error isn't re-paged across turns.
   - **Pager narrowing**: recall just the errored function, not the whole log.
-  - **A context-health signal**: detect repetition and re-run-the-same-command loops as a deterministic paging trigger, instead of a fixed token threshold.
-- **L3: execution offload** *(exploring).* Run well-specified, deterministic
-  sub-tasks outside the model entirely and hand back only the result.
+  - **A context-health signal**: detect repetition and loops that re-run the same failing command, as a deterministic paging trigger instead of a fixed token threshold.
+- **L3: execution offload** *(exploring).* Keep deterministic work out of the model entirely:
+  - **Skip unchanged re-runs**: when a test or build command runs again and none of its inputs changed, return the recorded result instead of running it.
+  - **Deltas**: report what changed since the last run ("2 fixed, 1 new failure") instead of the full output.
+  - **Offload**: run well-specified sub-tasks outside the model and hand back only the result.
 
 Layers compound: L1 shrinks what enters the window, L2 makes that shrink safe to
-undo, L3 keeps whole tasks out of the window to begin with. Issues and PRs
-against any layer are welcome (see [CONTRIBUTING](CONTRIBUTING.md)).
+undo and gives the model facts it can trust, L3 keeps whole tasks out of the
+window to begin with. Issues and PRs against any layer are welcome.
 
 ---
 
@@ -286,7 +294,7 @@ against any layer are welcome (see [CONTRIBUTING](CONTRIBUTING.md)).
 - **`ack toc` is Python-only** today; tree-sitter is structured to add languages.
 - **`--tui` is experimental:** Textual and the PTY interceptor both want the terminal, so the agent runs non-interactively in that mode. Plain `ack run` is the recommended interactive path.
 - **Heuristic by design.** Pruners are fast, deterministic, and free; a new output format needs a new pruner (easy to write, see above).
-- **Claude Code first.** `ack hook install` targets Claude Code. Other agents can use `ack exec`; native hooks for Codex and Gemini CLI are planned.
+- **Claude Code first.** `ack hook install` targets Claude Code. Other agents can use `ack exec`.
 - **pytest's own failure format is not pruned yet.** Plain Python tracebacks, Rust/GCC errors and log floods are.
 - **Sandboxed Claude sessions** archive to `$TMPDIR/ack/kernel.db`, because the home directory is read-only there; the banner's recall command points at it.
 
