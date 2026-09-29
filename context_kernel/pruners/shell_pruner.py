@@ -12,7 +12,9 @@ from collections import Counter
 
 from .base import BasePruner, PrunerMetadata
 
-_PY_TRACEBACK_HDR = re.compile(r"Traceback \(most recent call last\):", re.MULTILINE)
+# Anchored so a mention inside code or a string (a `cat` of Python source) is
+# not taken for a real traceback; logs may indent one, so allow leading space.
+_PY_TRACEBACK_HDR = re.compile(r"^\s*Traceback \(most recent call last\):", re.MULTILINE)
 
 _PY_FRAME_LINE = re.compile(
     r'^\s+File "(?P<file>[^"]+)", line (?P<lineno>\d+), in (?P<func>.+)',

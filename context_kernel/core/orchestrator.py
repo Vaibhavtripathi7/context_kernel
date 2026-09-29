@@ -32,6 +32,7 @@ _RESET = "\033[0m"
 
 _ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
+_MAX_SUMMARY_RATIO = 0.75  # a summary must be at least 25% shorter than its input
 
 
 def _incomplete_utf8_tail(data: bytes) -> bytes:
@@ -324,7 +325,8 @@ class Orchestrator:
         summary: str | None = None
         for pruner in self.pruners:
             result = pruner.compress(text)
-            if result is not None:
+            # A summary that saves little is noise on top of the real output.
+            if result is not None and len(result) <= _MAX_SUMMARY_RATIO * len(text):
                 summary = result
                 saved = max(0, (len(text) - len(summary)) // 4)
                 self._stats.tokens_saved      += saved

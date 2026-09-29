@@ -224,6 +224,23 @@ class TestMatches:
         coloured += "RuntimeError: boom\n"
         assert pruner.matches(coloured)
 
+    def test_marker_inside_a_string_is_not_a_traceback(self, pruner: ShellPruner) -> None:
+        code = [f"value_{i} = compute({i})" for i in range(40)]
+        code.insert(20, '    if "Traceback (most recent call last):" in text:')
+        code.insert(21, "        return True")
+        summary = pruner.compress("\n".join(code))
+        assert summary is None or "↳" not in summary
+
+    def test_indented_traceback_in_a_log_still_matches(self, pruner: ShellPruner) -> None:
+        text = (
+            "2026-09-29 12:00:01 ERROR worker crashed\n"
+            "    Traceback (most recent call last):\n"
+            '      File "/app/worker.py", line 12, in run\n'
+            "        job()\n"
+            "    ValueError: bad job\n"
+        )
+        assert pruner.matches(text)
+
 
 class TestPythonTracebackCompression:
     """Verify content quality and compression ratio for Python tracebacks."""

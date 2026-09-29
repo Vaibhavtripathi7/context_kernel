@@ -726,3 +726,27 @@ class TestFeedAndFlush:
         orch.flush(w, final=True)
         _read_pipe(r)
         assert storage.stats(orch.session_id)["pruned_entries"] == 1
+
+    def test_summary_that_saves_too_little_passes_through_raw(
+        self, storage: StorageEngine, pipe_pair
+    ) -> None:
+        r, w = pipe_pair
+
+        class BarelyShorter(BasePruner):
+            metadata = PrunerMetadata(name="barely", description="test")
+
+            def matches(self, text: str) -> bool:
+                return True
+
+            def compress(self, text: str) -> str | None:
+                return text[: int(len(text) * 0.9)]
+
+        orch = _exec_orchestrator(storage, [BarelyShorter()], color=False)
+        raw = b"".join(f"line {i}\n".encode() for i in range(40))
+        orch.feed(raw)
+        orch.flush(w, final=True)
+        assert _read_pipe(r) == raw
+        assert orch.stats.total_pruner_hits == 0
+        assert orch.stats.tokens_saved == 0
+        stats = storage.stats(orch.session_id)
+        assert stats["total_entries"] == 1 and stats["pruned_entries"] == 0
