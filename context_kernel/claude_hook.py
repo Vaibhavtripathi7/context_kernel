@@ -2,8 +2,9 @@
 
 Claude runs every Bash command through the prefix after its permission checks,
 so a prefix is the one place ACK can see command output before the model does.
-The prefix is a tiny shell shim: if ACK is ever removed, the shim runs the
-command directly so Claude keeps working.
+The prefix is a tiny shell shim: if ACK is removed or can no longer import,
+the shim runs the command directly with the shell Claude built it for, so
+Claude keeps working.
 """
 from __future__ import annotations
 
@@ -37,17 +38,40 @@ def settings_paths(project_dir: Path) -> dict[str, Path]:
 
 
 def render_shim(python: Path, ack_script: Path) -> str:
-    py, ack = shlex.quote(str(python)), shlex.quote(str(ack_script))
+    # Runs under `python -E -c`. With -c, sys.path[0] is the current directory,
+    # where a project's own modules could shadow ACK's imports, so drop it. If
+    # ACK cannot import, run the script with the shell Claude built it for.
+    bootstrap = (
+        "import os, re, shutil, sys\n"
+        "del sys.path[0]\n"
+        "ack, script = sys.argv[1], sys.argv[-1]\n"
+        "try:\n"
+        "    from context_kernel.cli import main\n"
+        "except BaseException:\n"
+        '    m = re.search(r"snapshot-(bash|zsh)-", script)\n'
+        '    sh = m and shutil.which(m.group(1)) or "/bin/sh"\n'
+        '    os.execv(sh, [sh, "-c", script])\n'
+        'sys.argv = [ack, "exec", "--claude", "--", script]\n'
+        "main()\n"
+    )
+    py, ack, code = (shlex.quote(str(x)) for x in (python, ack_script, bootstrap))
     return (
         "#!/bin/sh\n"
         "# Claude Code shell prefix installed by `ack hook install`.\n"
         "# -E keeps a project's PYTHONPATH from breaking ACK; the command itself\n"
-        "# still gets the full environment. If ACK is gone, run the command as is.\n"
+        "# still gets the full environment. If ACK is gone or cannot import, run\n"
+        "# the command with the shell Claude built it for.\n"
         f"if [ -x {py} ] && [ -f {ack} ]; then\n"
-        f'    exec {py} -E {ack} exec --claude -- "$@"\n'
+        f'    exec {py} -E -c {code} {ack} "$@"\n'
         "fi\n"
         "for last; do :; done\n"
-        'exec "${SHELL:-/bin/sh}" -c "$last"\n'
+        'case "$last" in\n'
+        "    *snapshot-zsh-*)  sh=zsh ;;\n"
+        "    *snapshot-bash-*) sh=bash ;;\n"
+        "    *)                sh=/bin/sh ;;\n"
+        "esac\n"
+        'command -v "$sh" >/dev/null 2>&1 || sh=/bin/sh\n'
+        'exec "$sh" -c "$last"\n'
     )
 
 
@@ -99,9 +123,9 @@ def uninstall(project_dir: Path, *, user: bool) -> Path | None:
     else:
         data.pop("env", None)
     if data or target.is_symlink():
-        # A symlinked settings file (common with dotfile managers) must keep
-        # existing: write the emptied object through it instead of unlinking
-        # the link and leaving the real file behind with our key still in it.
+        # Dotfile managers often symlink settings files. Deleting the link would
+        # leave the real file behind with our key in it, so write the empty
+        # object through the link.
         _write(target, data)
     else:
         target.unlink(missing_ok=True)
