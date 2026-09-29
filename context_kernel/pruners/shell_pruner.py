@@ -12,7 +12,9 @@ from collections import Counter
 
 from .base import BasePruner, PrunerMetadata
 
-_PY_TRACEBACK_HDR = re.compile(r"Traceback \(most recent call last\):", re.MULTILINE)
+# Anchored so a mention inside code or a string (a `cat` of Python source) is
+# not taken for a real traceback; logs may indent one, so allow leading space.
+_PY_TRACEBACK_HDR = re.compile(r"^\s*Traceback \(most recent call last\):", re.MULTILINE)
 
 _PY_FRAME_LINE = re.compile(
     r'^\s+File "(?P<file>[^"]+)", line (?P<lineno>\d+), in (?P<func>.+)',
@@ -83,8 +85,9 @@ class ShellPruner(BasePruner):
         lines = text.splitlines()
         blocks: list[dict[str, list[str] | str]] = []
         current_block: dict[str, list[str] | str] | None = None
+        last_exc_idx: int | None = None
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             if _PY_TRACEBACK_HDR.search(line):
                 current_block = {"frames": [], "exception": ""}
                 blocks.append(current_block)
@@ -105,12 +108,13 @@ class ShellPruner(BasePruner):
             if line and not line.startswith(" ") and not line.startswith("\t"):
                 current_block["exception"] = line.strip()
                 current_block = None
+                last_exc_idx = idx
 
         if not blocks:
             return text[:800] + "\n… [truncated by ACK shell_pruner]"
 
         parts: list[str] = []
-        for idx, block in enumerate(blocks, start=1):
+        for n, block in enumerate(blocks, start=1):
             frames_raw: list[str] = block["frames"]  # type: ignore[assignment]
             exc: str = str(block["exception"])
 
@@ -121,7 +125,7 @@ class ShellPruner(BasePruner):
             relevant = user_frames[-3:]
 
             header = (
-                f"── Traceback {idx}/{len(blocks)} ──"
+                f"── Traceback {n}/{len(blocks)} ──"
                 if len(blocks) > 1
                 else "── Traceback ──"
             )
@@ -132,22 +136,29 @@ class ShellPruner(BasePruner):
             (i for i, ln in enumerate(lines) if _PY_TRACEBACK_HDR.search(ln)),
             0,
         )
-        preamble = self._condense_preamble(lines[:first_tb])
+        preamble  = self._condense_context(lines[:first_tb])
+        postamble = (
+            self._condense_context(lines[last_exc_idx + 1:])
+            if last_exc_idx is not None
+            else ""
+        )
 
         result: list[str] = []
         if preamble:
             result.append(preamble)
         result.extend(parts)
+        if postamble:
+            result.append(postamble)
         return "\n\n".join(result)
 
-    def _condense_preamble(self, preamble_lines: list[str]) -> str:
-        """Summarise output that precedes a traceback in the same buffer.
+    def _condense_context(self, context_lines: list[str]) -> str:
+        """Summarise output around a traceback in the same buffer.
 
-        The common "logs, then a crash" pattern means a log flood often shares a
-        buffer with the traceback. Collapse a repetitive preamble to a frequency
-        table instead of dumping it verbatim; keep short, varied preambles as-is.
+        Logs before a crash and totals after it (a test runner's "2 failed")
+        often share a buffer with the traceback. Collapse a repetitive block to
+        a frequency table; keep short, varied text as-is.
         """
-        text = "\n".join(preamble_lines).strip()
+        text = "\n".join(context_lines).strip()
         if not text:
             return ""
         if self._is_highly_repetitive(text):

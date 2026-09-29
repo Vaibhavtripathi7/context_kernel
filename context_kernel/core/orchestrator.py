@@ -31,16 +31,35 @@ _CYAN  = "\033[36m"
 _RESET = "\033[0m"
 
 _ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[mGKHFJA-Z]")
-_TRACEBACK_MARKER = "Traceback (most recent call last):"
+# Anchored to match the pruner's own header check, so a mention inside code or
+# a string (a `cat` of Python source) is not taken for a real traceback.
+_TRACEBACK_HDR = re.compile(r"^\s*Traceback \(most recent call last\):", re.MULTILINE)
+_MAX_SUMMARY_RATIO = 0.75  # a summary must be at least 25% shorter than its input
+
+
+def _incomplete_utf8_tail(data: bytes) -> bytes:
+    """Return the trailing bytes of a UTF-8 character that has not fully arrived."""
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 == 0x80:          # continuation byte: keep looking back
+            continue
+        if byte < 0xC0:                  # ASCII: nothing pending
+            return b""
+        need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+        return data[-back:] if back < need else b""
+    return b""
 
 
 @dataclass
 class OrchestratorConfig:
-    pruning_threshold_lines: int   = 30
-    buffer_flush_timeout:    float = 0.15
-    read_chunk_bytes:        int   = 8192
-    annotate_injections:     bool  = True
-    max_buffer_bytes:        int   = 262144
+    pruning_threshold_lines:    int         = 30
+    buffer_flush_timeout:       float       = 0.15
+    read_chunk_bytes:           int         = 8192
+    annotate_injections:        bool        = True
+    max_buffer_bytes:           int         = 262144
+    color:                      bool        = True
+    recall_hint:                str | None  = None
+    archive_unpruned_max_bytes: int | None  = None
 
 
 @dataclass
@@ -93,6 +112,7 @@ class Orchestrator:
         self.config         = config or OrchestratorConfig()
         self.stats_callback = stats_callback
         self.text_callback: Callable[[str], None] | None = None
+        self.output_closed  = False
 
         self._stats               = OrchestratorStats()
         self._child_pid:           int | None = None
@@ -104,6 +124,36 @@ class Orchestrator:
     @property
     def stats(self) -> OrchestratorStats:
         return self._stats
+
+    def feed(self, chunk: bytes) -> None:
+        """Buffer output read by a caller that runs its own loop (`ack exec`)."""
+        self._stats.total_bytes_read += len(chunk)
+        self._buffer.append(chunk)
+
+    @property
+    def buffered_bytes(self) -> int:
+        return sum(len(chunk) for chunk in self._buffer)
+
+    def flush(self, fd: int, *, final: bool = False) -> None:
+        """Emit everything buffered now, pruning it if it qualifies.
+
+        Unless final, a UTF-8 character cut off at the end is held for the next
+        flush so it is never garbled. If pruning fails for any reason the raw
+        bytes are emitted instead: the command's output always gets through.
+        """
+        data = b"".join(self._buffer)
+        tail = b"" if final else _incomplete_utf8_tail(data)
+        head = data[: len(data) - len(tail)]
+        self._buffer.clear()
+        if head:
+            self._buffer.append(head)
+            try:
+                self._flush_buffer(fd, force=True)
+            except Exception:  # noqa: BLE001
+                self._buffer.clear()
+                self._emit(fd, head)
+        if tail:
+            self._buffer.append(tail)
 
     def run(self) -> int:
         """Spawn the agent, block until it exits, and return its exit code.
@@ -269,7 +319,7 @@ class Orchestrator:
 
         if below_threshold or self._text_is_prompt(text):
             self._emit(stdout_fd, raw)
-            self._persist(text, pruned=False)
+            self._persist_unpruned(text, len(raw))
             if self.text_callback is not None:
                 self.text_callback(text)
             return
@@ -277,7 +327,8 @@ class Orchestrator:
         summary: str | None = None
         for pruner in self.pruners:
             result = pruner.compress(text)
-            if result is not None:
+            # A summary that saves little is noise on top of the real output.
+            if result is not None and len(result) <= _MAX_SUMMARY_RATIO * len(text):
                 summary = result
                 saved = max(0, (len(text) - len(summary)) // 4)
                 self._stats.tokens_saved      += saved
@@ -293,7 +344,7 @@ class Orchestrator:
             _display = injection
         else:
             self._emit(stdout_fd, raw)
-            self._persist(text, pruned=False)
+            self._persist_unpruned(text, len(raw))
             _display = text
 
         if self.text_callback is not None:
@@ -318,6 +369,9 @@ class Orchestrator:
         while offset < len(data):
             try:
                 offset += os.write(fd, data[offset:])
+            except BrokenPipeError:
+                self.output_closed = True  # the reader is gone; callers stop feeding us
+                break
             except OSError:
                 break
 
@@ -337,18 +391,31 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             return None
 
+    def _persist_unpruned(self, text: str, raw_len: int) -> None:
+        """Archive output that passed through verbatim, unless it is over the cap.
+        The model already saw it in full, so a huge `cat` is not worth storing."""
+        limit = self.config.archive_unpruned_max_bytes
+        if limit is None or raw_len <= limit:
+            self._persist(text, pruned=False)
+
     def _format_injection(
         self, summary: str, original_lines: int, entry_id: int | None = None
     ) -> str:
-        body = f"{_CYAN}{summary}{_RESET}\n"
+        cyan, dim, reset = (_CYAN, _DIM, _RESET) if self.config.color else ("", "", "")
+        body = f"{cyan}{summary}{reset}\n"
         if not self.config.annotate_injections:
             return body
 
         summary_lines = len(summary.splitlines())
-        recall = f"recall: ack #{entry_id}" if entry_id is not None else "full log stored in DB"
+        if entry_id is None:
+            recall = "full log not archived"
+        elif self.config.recall_hint:
+            recall = f"full log: {self.config.recall_hint} {entry_id}"
+        else:
+            recall = f"recall: ack #{entry_id}"
         banner = (
-            f"{_DIM}[ACK] Compressed {original_lines} lines → "
-            f"{summary_lines} lines  ({recall}){_RESET}\n"
+            f"{dim}[ACK] Compressed {original_lines} lines → "
+            f"{summary_lines} lines  ({recall}){reset}\n"
         )
         return banner + body
 
@@ -359,14 +426,14 @@ class Orchestrator:
         are still arriving the last non-blank line is an indented frame line, or
         the header itself.
         """
-        if _TRACEBACK_MARKER not in text:
-            return False
         clean = _ANSI_ESC.sub("", text)
+        if not _TRACEBACK_HDR.search(clean):
+            return False
         nonblank = [ln for ln in clean.splitlines() if ln.strip()]
         if not nonblank:
             return False
         last = nonblank[-1]
-        if _TRACEBACK_MARKER in last:
+        if _TRACEBACK_HDR.match(last):
             return True
         return last[:1].isspace()
 

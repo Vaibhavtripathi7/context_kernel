@@ -1,28 +1,20 @@
-"""Command-line entrypoint and the optional Textual stats dashboard.
-
-In --tui mode the orchestrator runs on a background thread and Textual renders
-a stats/log overlay. Because both want the terminal, the agent runs
-non-interactively there; plain ack run is the interactive path.
-"""
+"""Command-line entrypoint."""
 from __future__ import annotations
 
+import os
 import re
 import sys
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 import click
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
-from textual.widgets import Footer, Header, RichLog, Static
 
+from . import claude_hook
+from .core import executor
 from .core.orchestrator import Orchestrator, OrchestratorConfig, OrchestratorStats
-from .memory.pager import Pager
-from .memory.storage import StorageEngine
+from .memory.storage import _DEFAULT_DB, StorageEngine
 from .pruners.shell_pruner import ShellPruner
 
 _USD_PER_MILLION_INPUT_TOKENS = 3.0
@@ -73,127 +65,6 @@ def _print_session_summary(
         click.echo("\n" + "\n".join(lines), err=True)
     except (BrokenPipeError, OSError):
         pass
-
-
-class StatsPanel(Static):
-    stats: reactive[OrchestratorStats] = reactive(OrchestratorStats())
-
-    def render(self) -> str:  # type: ignore[override]
-        s: OrchestratorStats = self.stats
-        elapsed = max(1, int(time.monotonic() - s.session_start))
-        ratio = (
-            f"{s.tokens_saved / max(1, s.total_bytes_read // 4):.0%}"
-            if s.total_bytes_read
-            else "0%"
-        )
-        return (
-            "[bold cyan]ACK[/bold cyan] — Agent Context Kernel\n"
-            "─────────────────────────────────\n"
-            f"Bytes intercepted : {s.total_bytes_read:>10,}\n"
-            f"Bytes injected    : {s.total_bytes_injected:>10,}\n"
-            f"Pruner hits       : {s.total_pruner_hits:>10,}\n"
-            f"Tokens saved      : {s.tokens_saved:>10,}\n"
-            f"Compression ratio : {ratio:>10}\n"
-            f"Elapsed           : {elapsed:>9}s\n"
-        )
-
-
-class AckDashboard(App[int]):
-    """Live stats overlay; polls Orchestrator.stats once a second."""
-
-    CSS = """
-    Screen {
-        layout: horizontal;
-    }
-
-    #log-panel {
-        width: 1fr;
-        height: 100%;
-        border: solid $primary;
-        padding: 0 1;
-    }
-
-    #stats-panel {
-        width: 36;
-        height: 100%;
-        border: solid $accent;
-        padding: 1 2;
-    }
-
-    StatsPanel {
-        height: auto;
-    }
-
-    RichLog {
-        height: 1fr;
-    }
-    """
-
-    BINDINGS = [
-        Binding("q",       "quit", "Quit"),
-        Binding("ctrl+c",  "quit", "Quit"),
-    ]
-
-    def __init__(self, orchestrator: Orchestrator) -> None:
-        super().__init__()
-        self._orchestrator  = orchestrator
-        self._orch_thread:   threading.Thread | None = None
-        self._stats_panel:   StatsPanel | None       = None
-        self._log_widget:    RichLog | None           = None
-        self._log_buffer:    list[str]                   = []
-        self._log_lock       = threading.Lock()
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal():
-            with Vertical(id="log-panel"):
-                self._log_widget = RichLog(
-                    id="agent-log",
-                    wrap=True,
-                    highlight=True,
-                    markup=True,
-                )
-                yield self._log_widget
-            with Vertical(id="stats-panel"):
-                self._stats_panel = StatsPanel()
-                yield self._stats_panel
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self._orchestrator.text_callback = self._enqueue_log
-        self._orch_thread = threading.Thread(
-            target=self._orchestrator.run,
-            daemon=True,
-            name="ack-orchestrator",
-        )
-        self._orch_thread.start()
-        self.set_interval(1.0, self._refresh_stats)
-        self.set_interval(1 / 30, self._flush_log)
-
-    def _refresh_stats(self) -> None:
-        if self._stats_panel is not None:
-            self._stats_panel.stats = self._orchestrator.stats
-            self._stats_panel.refresh()
-
-        if self._orch_thread is not None and not self._orch_thread.is_alive():
-            self.exit(0)
-
-    def _enqueue_log(self, text: str) -> None:
-        with self._log_lock:
-            self._log_buffer.append(text)
-
-    def _flush_log(self) -> None:
-        with self._log_lock:
-            if not self._log_buffer:
-                return
-            chunks, self._log_buffer = self._log_buffer, []
-
-        if self._log_widget is not None:
-            for chunk in chunks:
-                self._log_widget.write(chunk)
-
-    async def action_quit(self) -> None:
-        self.exit(0)
 
 
 @click.group()
@@ -260,6 +131,8 @@ def cmd_run(
     )
 
     if tui:
+        from .tui import AckDashboard
+
         exit_code = AckDashboard(orchestrator=orch).run() or 0
     else:
         exit_code = orch.run()
@@ -268,6 +141,129 @@ def cmd_run(
 
     storage.close()
     sys.exit(exit_code)
+
+
+_EXEC_ARCHIVE_UNPRUNED_MAX = 64 * 1024
+
+
+def _exec_or_die(path: str, argv: list[str]) -> NoReturn:
+    """Replace this process with argv, or report the failure like a shell would."""
+    try:
+        os.execv(path, argv)
+    except OSError as exc:
+        click.echo(f"ack: cannot run {path}: {exc.strerror}", err=True)
+        sys.exit(127)
+
+
+@main.command(name="exec")
+@click.argument("command", nargs=-1, required=True)
+@click.option(
+    "--claude",
+    "claude_script",
+    is_flag=True,
+    help="COMMAND is one script from Claude Code's shell prefix (set by `ack hook install`).",
+)
+@click.option("--session", "session_id", default=None, metavar="ID",
+              help="Archive under this session id.")
+@click.option("--db", default=None, type=click.Path(path_type=Path),
+              help="Path to the ACK SQLite database.")
+def cmd_exec(
+    command:       tuple[str, ...],
+    claude_script: bool,
+    session_id:    str | None,
+    db:            Path | None,
+) -> None:
+    """Run COMMAND and prune its output before the agent reads it.
+
+    Example: ack exec -- pytest -x
+    """
+    if claude_script:
+        script = command[-1]
+        if not executor.is_bash_tool_script(script):
+            # Claude's hooks run as Claude runs them.
+            _exec_or_die("/bin/sh", ["/bin/sh", "-c", script])
+        shell = executor.shell_for(script)
+        argv  = [shell, "-c", script]
+        if executor.invokes_ack_reader(script):
+            _exec_or_die(shell, argv)  # ACK's own readers are never pruned again
+        session_id = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        agent = "claude"
+    else:
+        argv  = list(command)
+        agent = " ".join(argv)
+
+    try:
+        db_path, fallback = (db, False) if db else executor.writable_archive(_DEFAULT_DB)
+        storage = StorageEngine(db_path=db_path)
+        storage.open()
+        if session_id:
+            storage.ensure_session(session_id, agent)
+        else:
+            session_id = storage.create_session(agent).session_id
+        hint = executor.recall_hint(
+            Path(sys.argv[0]), db_path, explicit_db=fallback or db is not None
+        )
+        orch = Orchestrator(
+            command=argv,
+            session_id=session_id,
+            storage=storage,
+            pruners=[ShellPruner()],
+            config=OrchestratorConfig(
+                color=False,
+                recall_hint=hint,
+                archive_unpruned_max_bytes=_EXEC_ARCHIVE_UNPRUNED_MAX,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        # ACK must never be the reason a command fails: run it unmodified.
+        try:
+            os.execvp(argv[0], argv)
+        except OSError as exc:
+            click.echo(f"ack: cannot run {argv[0]}: {exc.strerror}", err=True)
+            sys.exit(127)
+
+    code = executor.run_piped(argv, orch, sys.stdout.fileno())
+    try:
+        storage.close()
+    except Exception:  # noqa: BLE001
+        pass  # the command already ran; a close failure must not change its exit code
+    sys.exit(code)
+
+
+@main.group(name="hook")
+def cmd_hook() -> None:
+    """Connect ACK to Claude Code."""
+
+
+@cmd_hook.command(name="install")
+@click.option("--user", "user_scope", is_flag=True,
+              help="Install for every project (~/.claude/settings.json).")
+def cmd_hook_install(user_scope: bool) -> None:
+    """Route Claude Code's Bash commands through `ack exec`."""
+    try:
+        target = claude_hook.install(
+            Path.cwd(),
+            user=user_scope,
+            python=Path(sys.executable),
+            ack_script=Path(sys.argv[0]).resolve(),
+            env=os.environ,
+        )
+    except claude_hook.HookError as exc:
+        click.echo(f"ack: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"Installed in {target}. Start a new Claude Code session to use it.")
+
+
+@cmd_hook.command(name="uninstall")
+@click.option("--user", "user_scope", is_flag=True, help="Remove the user-wide install.")
+def cmd_hook_uninstall(user_scope: bool) -> None:
+    """Stop routing Claude Code's Bash commands through ACK."""
+    try:
+        target = claude_hook.uninstall(Path.cwd(), user=user_scope)
+    except claude_hook.HookError as exc:
+        click.echo(f"ack: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"Removed from {target}." if target else "ACK was not installed there.")
 
 
 @main.command(name="search")
@@ -328,7 +324,8 @@ def cmd_search(
     "session_id",
     default=None,
     metavar="SESSION_ID",
-    help="Session to search when TARGET is a query (default: most recent).",
+    help="Session to search when TARGET is a query (default: current Claude session, "
+         "else most recent).",
 )
 @click.option(
     "--all",
@@ -368,7 +365,8 @@ def cmd_recall(
 
     TARGET is either a numeric recall handle (the "ack #N" shown on a pruned
     banner -> `ack recall N`) or an FTS5 query, in which case the best match
-    from the most recent session is returned. Use --all to widen the search.
+    from the current Claude session (or else the most recent one) is returned.
+    Use --all to widen the search.
     """
     render: Callable[[str], str] = (lambda t: t) if raw else _sanitize
     storage = StorageEngine(db_path=db) if db else StorageEngine()
@@ -379,8 +377,13 @@ def cmd_recall(
         else:
             scope = session_id
             if scope is None and not all_sessions:
-                recent = storage.list_sessions(limit=1)
-                scope  = recent[0]["session_id"] if recent else None
+                # Under `ack exec`, the latest session may be another Claude window.
+                current = os.environ.get("CLAUDE_CODE_SESSION_ID")
+                if current and storage.get_session(current) is not None:
+                    scope = current
+                else:
+                    recent = storage.list_sessions(limit=1)
+                    scope  = recent[0]["session_id"] if recent else None
             rows = storage.search(target, session_id=scope, limit=limit)
 
     if not rows:
@@ -399,6 +402,8 @@ def cmd_recall(
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 def cmd_toc(file: Path) -> None:
     """Print the symbol table-of-contents for a source FILE."""
+    from .memory.pager import Pager
+
     pager = Pager()
     try:
         fmap = pager.map_file(file)

@@ -1,6 +1,7 @@
 """StorageEngine tests: schema/CRUD, FTS5 search, WAL concurrency, stats."""
 from __future__ import annotations
 
+import multiprocessing
 import threading
 import time
 from pathlib import Path
@@ -447,6 +448,53 @@ class TestConcurrentWALWrites:
         assert not w_thread.is_alive(), "Writer thread timed out — possible deadlock."
         assert not reader_errors, f"Reader errors: {reader_errors}"
         eng.close()
+
+
+def _write_from_process(db_path: str, session_id: str, count: int) -> None:
+    eng = StorageEngine(db_path=Path(db_path))
+    eng.open()
+    eng.ensure_session(session_id, "multiprocess-test")
+    for i in range(count):
+        eng.insert_entry(
+            LogEntry(session_id=session_id, raw_content=f"entry {i} {'x' * 200}",
+                     entry_type="stdout")
+        )
+    eng.close()
+
+
+class TestMultiProcessWrites:
+    """Separate processes each open their own connection, like parallel
+    `ack exec` calls. A deferred BEGIN upgraded to a write lock fails with
+    SQLITE_BUSY instead of waiting, which silently lost rows."""
+
+    def test_no_rows_lost_across_processes(self, db_path: Path) -> None:
+        ctx = multiprocessing.get_context("fork")
+        procs = [
+            ctx.Process(target=_write_from_process, args=(str(db_path), "shared", 25))
+            for _ in range(8)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+        assert all(p.exitcode == 0 for p in procs)
+        with StorageEngine(db_path=db_path) as eng:
+            assert eng.stats("shared")["total_entries"] == 8 * 25
+
+
+class TestEnsureSession:
+    def test_creates_missing_session(self, engine: StorageEngine) -> None:
+        engine.ensure_session("claude-abc", "claude")
+        rec = engine.get_session("claude-abc")
+        assert rec is not None
+        assert rec.agent_command == "claude"
+
+    def test_is_idempotent(self, engine: StorageEngine) -> None:
+        engine.ensure_session("claude-abc", "claude")
+        engine.ensure_session("claude-abc", "other")
+        rec = engine.get_session("claude-abc")
+        assert rec is not None
+        assert rec.agent_command == "claude"
 
 
 class TestStatsAggregation:

@@ -91,12 +91,14 @@ def _make_python_traceback_massive() -> str:
     50-frame traceback that simulates a deep async call chain (Django/FastAPI).
     This is the worst-case scenario for context-window pollution.
     """
-    user_frames = textwrap.dedent("""\
-          File "/app/src/views/checkout.py", line 201, in post
-            order = cart.checkout(user_id=user.pk, payment=payload)
-          File "/app/src/models/cart.py", line 88, in checkout
-            charge_result = payment_gateway.charge(amount, card_token)
-    """)
+    user_frames = "\n".join(
+        [
+            '  File "/app/src/views/checkout.py", line 201, in post',
+            "    order = cart.checkout(user_id=user.pk, payment=payload)",
+            '  File "/app/src/models/cart.py", line 88, in checkout',
+            "    charge_result = payment_gateway.charge(amount, card_token)",
+        ]
+    )
     framework_frames = "\n".join(
         f'  File "/home/user/.venv/lib/python3.13/site-packages/django/core/handlers/base.py",'
         f" line {200 + i}, in _get_response\n"
@@ -106,6 +108,7 @@ def _make_python_traceback_massive() -> str:
     return (
         "Traceback (most recent call last):\n"
         + user_frames
+        + "\n"
         + framework_frames
         + "\nKeyError: 'card_token'\n"
     )
@@ -220,6 +223,23 @@ class TestMatches:
         coloured += "    raise RuntimeError('boom')\n"
         coloured += "RuntimeError: boom\n"
         assert pruner.matches(coloured)
+
+    def test_marker_inside_a_string_is_not_a_traceback(self, pruner: ShellPruner) -> None:
+        code = [f"value_{i} = compute({i})" for i in range(40)]
+        code.insert(20, '    if "Traceback (most recent call last):" in text:')
+        code.insert(21, "        return True")
+        summary = pruner.compress("\n".join(code))
+        assert summary is None or "↳" not in summary
+
+    def test_indented_traceback_in_a_log_still_matches(self, pruner: ShellPruner) -> None:
+        text = (
+            "2026-09-29 12:00:01 ERROR worker crashed\n"
+            "    Traceback (most recent call last):\n"
+            '      File "/app/worker.py", line 12, in run\n'
+            "        job()\n"
+            "    ValueError: bad job\n"
+        )
+        assert pruner.matches(text)
 
 
 class TestPythonTracebackCompression:
@@ -413,3 +433,77 @@ class TestEdgeCases:
         )
         result = pruner.compress(latin1_text)
         assert result is None or isinstance(result, str)
+
+
+_TB = (
+    "Traceback (most recent call last):\n"
+    '  File "/app/src/views/checkout.py", line 201, in post\n'
+    "    order = cart.checkout()\n"
+    + "".join(
+        f'  File "/venv/lib/python3.11/site-packages/django/base.py", line {200 + i}, in f\n'
+        "    response = cb()\n"
+        for i in range(20)
+    )
+    + "KeyError: 'card_token'\n"
+)
+
+
+class TestLinesAfterTraceback:
+    """With `ack exec` a command's whole output can arrive as one chunk, so text
+    after the exception (test totals, exit markers) must survive the summary."""
+
+    def test_short_trailing_lines_kept(self) -> None:
+        text = _TB + "2 failed, 3 passed in 0.05s\nEXIT_CODE=1\n"
+        out = ShellPruner().compress(text)
+        assert out is not None
+        assert "KeyError: 'card_token'" in out
+        assert "2 failed, 3 passed in 0.05s" in out
+        assert "EXIT_CODE=1" in out
+        assert out.index("KeyError") < out.index("2 failed")
+
+    def test_trailing_flood_condensed(self) -> None:
+        text = _TB + "WARNING retrying\n" * 50
+        out = ShellPruner().compress(text)
+        assert out is not None
+        assert "Repetitive output" in out
+        assert out.count("WARNING retrying") == 1
+
+    def test_nothing_after_traceback_adds_nothing(self) -> None:
+        out = ShellPruner().compress(_TB)
+        assert out is not None
+        assert out.rstrip().endswith("KeyError: 'card_token'")
+
+    def test_bare_exception_kept(self) -> None:
+        """Bare exceptions without a message (like KeyboardInterrupt) must be captured."""
+        text = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/main.py", line 5, in main\n'
+            "    wait_forever()\n"
+            "KeyboardInterrupt\n"
+        )
+        out = ShellPruner().compress(text)
+        assert out is not None
+        assert "KeyboardInterrupt" in out
+
+    def test_chained_bare_exception_with_trailing_line(self) -> None:
+        """Chained traceback with bare exception must not leak raw traceback into postamble."""
+        text = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/db.py", line 10, in connect\n'
+            "    self._conn = sqlite3.connect(self.dsn)\n"
+            "ValueError: invalid database\n"
+            "\n"
+            "During handling of the above exception, another exception occurred:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            '  File "/app/service.py", line 20, in fetch\n'
+            "    conn = db.connect()\n"
+            "StopIteration\n"
+            "CLEANUP_DONE\n"
+        )
+        out = ShellPruner().compress(text)
+        assert out is not None
+        assert "↳ StopIteration" in out
+        assert "CLEANUP_DONE" in out
+        assert "Traceback (most recent call last):" not in out
+        assert 'File "' not in out

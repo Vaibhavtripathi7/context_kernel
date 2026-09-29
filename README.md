@@ -3,15 +3,15 @@
 
 **Intelligent memory middleware for terminal AI coding agents.**
 
-ACK is a transparent proxy between you and any terminal AI agent (Aider, Claude Code, and others). It collapses the noisy, high-token output that pollutes the context window (stack traces, build-error walls, log floods) into its actionable signal, and archives the full untouched stream to a local searchable database.
+ACK sits between a terminal AI agent and the commands it runs. It collapses the noisy, high-token output that pollutes the context window (stack traces, build-error walls, log floods) into its actionable signal before the model reads it, and archives the full untouched output to a local searchable database. For Claude Code it plugs in with one command, `ack hook install`; any other agent can run its commands through `ack exec`.
 
-Your agent sees the signal. The full log is one `ack recall` away — for you *and* the agent itself.
+Your agent sees the signal. The full log is one `ack recall` away, for you *and* the agent itself.
 
 [![Website](https://img.shields.io/badge/website-ack--context--kernel.vercel.app-4f6f4c.svg)](https://ack-context-kernel.vercel.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-POSIX-lightgrey.svg)
-![Tests](https://img.shields.io/badge/tests-107%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-190%20passing-brightgreen.svg)
 
 ---
 
@@ -56,7 +56,11 @@ ACK keeps the signal, drops the noise, and never loses the original. The pruning
 
 ## How it works
 
-ACK spawns your agent inside a real pseudo-terminal (`openpty` + `fork` + `setsid`), so prompts, colors, and cursor movement behave exactly as if you launched it directly. A single `select()` loop multiplexes your keyboard, the agent, the screen, and the database.
+**Where it plugs in.** Coding agents run shell commands in their own subprocesses and read the output directly, so ACK sits on that path. For Claude Code, `ack hook install` makes ACK its shell prefix (`CLAUDE_CODE_SHELL_PREFIX`): every Bash command runs through `ack exec`, after Claude's permission checks and inside its sandbox when that is on. Output reaches the agent after a short pause, or every five seconds at most, so long-running servers stay visible.
+
+`ack run` is the other mode. It wraps a program's terminal, which is handy for watching output yourself and for programs that print straight to the terminal, but it does not change what an agent's model reads.
+
+`ack run` spawns the program inside a real pseudo-terminal (`openpty` + `fork` + `setsid`), so prompts, colors, and cursor movement behave exactly as if you launched it directly. A single `select()` loop multiplexes your keyboard, the agent, the screen, and the database.
 
 ![Arch diagram](./assets/context-kernel.drawio.png)
 
@@ -70,7 +74,7 @@ Every flushed buffer is handled in order:
 3. **Large blobs run through ordered pruners.** First match wins: a hit injects a compact summary, a miss passes through.
 4. **Everything is persisted.** The summary is a view, never a deletion.
 
-When a pruner fires you see exactly what happened — and a stable handle to page the original back:
+When a pruner fires you see exactly what happened, and a stable handle to page the original back:
 
 ```
 [ACK] Compressed 63 lines → 4 lines  (recall: ack #42)
@@ -80,9 +84,11 @@ When a pruner fires you see exactly what happened — and a stable handle to pag
   ↳ KeyError: 'card_token'
 ```
 
+Through `ack exec` the banner names the exact command instead, for example `(full log: ack recall 42)`, so a model that has never heard of ACK knows how to get the rest.
+
 ### Recall: the archive is readable, not just written
 
-Pruning that you can't undo is just lossy compression. ACK stamps every pruned injection with a handle (`ack #42`) and exposes `ack recall` as a plain shell command — so when the summary isn't enough, the exact original bytes come back on demand, by handle or by search:
+Pruning that you can't undo is just lossy compression. ACK stamps every pruned injection with a handle (`ack #42`) and exposes `ack recall` as a plain shell command, so when the summary isn't enough, the exact original bytes come back on demand, by handle or by search:
 
 ```bash
 ack recall 42                     # page back the full log behind that banner
@@ -111,14 +117,16 @@ poetry run ack --help
 ## Quick start
 
 ```bash
-# Wrap any agent. Everything after `--` is the agent command.
-ack run -- aider --model gpt-4o
-ack run -- claude --dangerously-skip-permissions
+# Claude Code: route every Bash command it runs through ACK (once per project)
+ack hook install              # all projects: ack hook install --user; undo: ack hook uninstall
+
+# Any other agent or script: run a command through ACK
+ack exec -- pytest -x
 
 # Search the full archive of every session (FTS5 syntax, BM25 ranked)
 ack search "ImportError OR ModuleNotFoundError"
 
-# Page a pruned log back — by its `ack #N` handle, or by content
+# Page a pruned log back (by its `ack #N` handle, or by content)
 ack recall 42
 ack recall "ImportError"
 
@@ -181,9 +189,13 @@ The built-in `ShellPruner` targets the three biggest offenders. The original byt
 | `--no-annotate` | off | Suppress the `[ACK]` banners. |
 | `--tui` | off | Experimental Textual stats dashboard. |
 
+**`ack exec -- <command>`** runs a command and prunes its output before the agent reads it. Options: `--session ID`, `--db`. `--claude` is the form Claude Code's shell prefix uses; you do not call it yourself. Exit codes pass through unchanged, and if ACK itself hits a problem the command runs unmodified.
+
+**`ack hook install`** / **`ack hook uninstall`** add or remove ACK as Claude Code's shell prefix in `.claude/settings.local.json` (or `~/.claude/settings.json` with `--user`). Install refuses if a different prefix is already set, and checks that the prefix works before saving.
+
 **`ack search "<query>"`** takes an FTS5 expression (`AND`/`OR`/`NOT`, prefix, phrase) and ranks results by BM25. Options: `--session`, `--limit` (default 20), `--db`.
 
-**`ack recall <id|query>`** pages a stored log back. A numeric argument is an `ack #N` handle (exact lookup); anything else is a search, scoped to the most recent session by default. Options: `--session`, `--all` (search every session), `--limit` (default 1), `--raw` (skip escape-sequence sanitisation), `--db`.
+**`ack recall <id|query>`** pages a stored log back. A numeric argument is an `ack #N` handle (exact lookup); anything else is a search, scoped by default to the current Claude Code session, or the most recent session outside Claude. Options: `--session`, `--all` (search every session), `--limit` (default 1), `--raw` (skip escape-sequence sanitisation), `--db`.
 
 **`ack toc <file>`** prints a symbol table-of-contents (Python today).
 
@@ -232,7 +244,7 @@ Register with `pruners=[MyPruner(), ShellPruner()]` on the `Orchestrator`. Prune
 
 ```bash
 poetry install
-poetry run pytest                        # 107 tests (unit + integration)
+poetry run pytest                        # 190 tests (unit + integration)
 poetry run pytest -m "not integration"   # fast unit tests only
 poetry run python scripts/run_benchmarks.py          # L1 compression / fidelity
 poetry run python scripts/run_recall_benchmark.py    # L2 needle recovery
@@ -250,21 +262,21 @@ ACK is one piece of a larger idea: treat the context window as a scarce resource
 to be managed, and keep deterministic work out of the model's way. The pruner you
 see today is the first of three layers.
 
-- **L1 — output reduction** *(shipped).* The pruners. Collapse deterministic
-  noise — tracebacks, build-error walls, log floods — to its signal before it
+- **L1: output reduction** *(shipped).* The pruners. Collapse deterministic
+  noise (tracebacks, build-error walls, log floods) to its signal before it
   ever reaches the model.
-- **L2 — memory paging** *(in progress).* The archive plus `ack recall`. Pruned
+- **L2: memory paging** *(in progress).* The archive plus `ack recall`. Pruned
   detail is recoverable on demand, so compression is never a one-way loss.
   Shipped: stable `ack #N` handles and recall by id or content. Next:
-  - **Proactive dedup** — content-hash repeated output so the same error isn't re-paged across turns.
-  - **Pager narrowing** — recall just the errored function, not the whole log.
-  - **A context-health signal** — detect repetition and re-run-the-same-command loops as a deterministic paging trigger, instead of a fixed token threshold.
-- **L3 — execution offload** *(exploring).* Run well-specified, deterministic
+  - **Proactive dedup**: content-hash repeated output so the same error isn't re-paged across turns.
+  - **Pager narrowing**: recall just the errored function, not the whole log.
+  - **A context-health signal**: detect repetition and re-run-the-same-command loops as a deterministic paging trigger, instead of a fixed token threshold.
+- **L3: execution offload** *(exploring).* Run well-specified, deterministic
   sub-tasks outside the model entirely and hand back only the result.
 
 Layers compound: L1 shrinks what enters the window, L2 makes that shrink safe to
 undo, L3 keeps whole tasks out of the window to begin with. Issues and PRs
-against any layer are welcome — see [CONTRIBUTING](CONTRIBUTING.md).
+against any layer are welcome (see [CONTRIBUTING](CONTRIBUTING.md)).
 
 ---
 
@@ -274,6 +286,9 @@ against any layer are welcome — see [CONTRIBUTING](CONTRIBUTING.md).
 - **`ack toc` is Python-only** today; tree-sitter is structured to add languages.
 - **`--tui` is experimental:** Textual and the PTY interceptor both want the terminal, so the agent runs non-interactively in that mode. Plain `ack run` is the recommended interactive path.
 - **Heuristic by design.** Pruners are fast, deterministic, and free; a new output format needs a new pruner (easy to write, see above).
+- **Claude Code first.** `ack hook install` targets Claude Code. Other agents can use `ack exec`; native hooks for Codex and Gemini CLI are planned.
+- **pytest's own failure format is not pruned yet.** Plain Python tracebacks, Rust/GCC errors and log floods are.
+- **Sandboxed Claude sessions** archive to `$TMPDIR/ack/kernel.db`, because the home directory is read-only there; the banner's recall command points at it.
 
 ---
 
