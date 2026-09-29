@@ -177,3 +177,17 @@ class TestGenericForm:
         )
         assert res.stdout == "1\n"
         assert "Traceback" not in res.stderr
+
+    def test_stops_when_reader_goes_away(self, tmp_path: Path) -> None:
+        cmd = " ".join(shlex.quote(a) for a in ACK)
+        start = time.monotonic()
+        res = subprocess.run(
+            f"{cmd} exec --db {tmp_path / 'k.db'} -- yes | head -1",
+            shell=True, capture_output=True, text=True, timeout=10,  # noqa: S602
+        )
+        assert time.monotonic() - start < 10
+        # The first flush is 256KB of "y" lines, so head sees the summary banner.
+        assert res.stdout.startswith("[ACK] Compressed") and res.stdout.count("\n") == 1
+        assert "Traceback" not in res.stderr
+        archived = sum(f.stat().st_size for f in tmp_path.glob("k.db*"))
+        assert archived < 1_000_000

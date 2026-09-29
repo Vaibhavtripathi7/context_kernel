@@ -131,15 +131,20 @@ def run_piped(
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
-    orch.flush(out_fd, final=True)
-    _hand_off(r, out_fd)
+    if not orch.output_closed:
+        orch.flush(out_fd, final=True)
+        if orch.output_closed:
+            os.close(r)
+        else:
+            _hand_off(r, out_fd)
     code = os.waitstatus_to_exitcode(status)
     return 128 - code if code < 0 else code
 
 
 def _pump(r: int, pid: int, orch: Orchestrator, out_fd: int, timing: ExecTiming) -> int:
-    """Read until the command's shell exits, flushing on silence, on max hold,
-    or when the buffer is full. Returns the raw wait status."""
+    """Read until the command's shell exits or our output is closed, flushing
+    on silence, on max hold, or when the buffer is full. Returns the raw wait
+    status."""
     status: int | None = None
     exit_deadline = first = last = 0.0
     while True:
@@ -175,6 +180,14 @@ def _pump(r: int, pid: int, orch: Orchestrator, out_fd: int, timing: ExecTiming)
             ):
                 orch.flush(out_fd)
                 first = last = now
+
+        if orch.output_closed:
+            # Like a shell pipeline: close our end so the command gets SIGPIPE
+            # on its next write, and stop reading and archiving.
+            os.close(r)
+            if status is None:
+                _, status = os.waitpid(pid, 0)
+            return status
 
 
 def _hand_off(r: int, out_fd: int) -> None:

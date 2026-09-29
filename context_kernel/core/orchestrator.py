@@ -109,6 +109,7 @@ class Orchestrator:
         self.config         = config or OrchestratorConfig()
         self.stats_callback = stats_callback
         self.text_callback: Callable[[str], None] | None = None
+        self.output_closed  = False
 
         self._stats               = OrchestratorStats()
         self._child_pid:           int | None = None
@@ -364,6 +365,9 @@ class Orchestrator:
         while offset < len(data):
             try:
                 offset += os.write(fd, data[offset:])
+            except BrokenPipeError:
+                self.output_closed = True  # the reader is gone; callers stop feeding us
+                break
             except OSError:
                 break
 
