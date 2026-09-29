@@ -11,7 +11,7 @@ Your agent sees the signal. The full log is one `ack recall` away — for you *a
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-POSIX-lightgrey.svg)
-![Tests](https://img.shields.io/badge/tests-178%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-188%20passing-brightgreen.svg)
 
 ---
 
@@ -56,7 +56,7 @@ ACK keeps the signal, drops the noise, and never loses the original. The pruning
 
 ## How it works
 
-**Where it plugs in.** Coding agents run shell commands in their own subprocesses and read the output directly, so ACK sits on that path. For Claude Code, `ack hook install` makes ACK its shell prefix (`CLAUDE_CODE_SHELL_PREFIX`): every Bash command runs through `ack exec`, after Claude's permission checks and inside its sandbox when that is on. Output streams through as it arrives (a quiet moment or five seconds at most), so long-running servers stay visible.
+**Where it plugs in.** Coding agents run shell commands in their own subprocesses and read the output directly, so ACK sits on that path. For Claude Code, `ack hook install` makes ACK its shell prefix (`CLAUDE_CODE_SHELL_PREFIX`): every Bash command runs through `ack exec`, after Claude's permission checks and inside its sandbox when that is on. Output reaches the agent after a short pause, or every five seconds at most, so long-running servers stay visible.
 
 `ack run` is the other mode. It wraps a program's terminal, which is handy for watching output yourself and for programs that print straight to the terminal, but it does not change what an agent's model reads.
 
@@ -244,7 +244,7 @@ Register with `pruners=[MyPruner(), ShellPruner()]` on the `Orchestrator`. Prune
 
 ```bash
 poetry install
-poetry run pytest                        # 178 tests (unit + integration)
+poetry run pytest                        # 188 tests (unit + integration)
 poetry run pytest -m "not integration"   # fast unit tests only
 poetry run python scripts/run_benchmarks.py          # L1 compression / fidelity
 poetry run python scripts/run_recall_benchmark.py    # L2 needle recovery
