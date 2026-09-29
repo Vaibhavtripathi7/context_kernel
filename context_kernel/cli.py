@@ -11,6 +11,7 @@ from typing import NoReturn
 
 import click
 
+from . import claude_hook
 from .core import executor
 from .core.orchestrator import Orchestrator, OrchestratorConfig, OrchestratorStats
 from .memory.storage import _DEFAULT_DB, StorageEngine
@@ -227,6 +228,42 @@ def cmd_exec(
     except Exception:  # noqa: BLE001
         pass  # the command already ran; a close failure must not change its exit code
     sys.exit(code)
+
+
+@main.group(name="hook")
+def cmd_hook() -> None:
+    """Connect ACK to Claude Code."""
+
+
+@cmd_hook.command(name="install")
+@click.option("--user", "user_scope", is_flag=True,
+              help="Install for every project (~/.claude/settings.json).")
+def cmd_hook_install(user_scope: bool) -> None:
+    """Route Claude Code's Bash commands through `ack exec`."""
+    try:
+        target = claude_hook.install(
+            Path.cwd(),
+            user=user_scope,
+            python=Path(sys.executable),
+            ack_script=Path(sys.argv[0]).resolve(),
+            env=os.environ,
+        )
+    except claude_hook.HookError as exc:
+        click.echo(f"ack: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"Installed in {target}. Start a new Claude Code session to use it.")
+
+
+@cmd_hook.command(name="uninstall")
+@click.option("--user", "user_scope", is_flag=True, help="Remove the user-wide install.")
+def cmd_hook_uninstall(user_scope: bool) -> None:
+    """Stop routing Claude Code's Bash commands through ACK."""
+    try:
+        target = claude_hook.uninstall(Path.cwd(), user=user_scope)
+    except claude_hook.HookError as exc:
+        click.echo(f"ack: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"Removed from {target}." if target else "ACK was not installed there.")
 
 
 @main.command(name="search")
